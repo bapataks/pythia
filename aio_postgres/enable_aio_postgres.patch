@@ -1,0 +1,2691 @@
+diff --git a/src/backend/access/heap/heapam.c b/src/backend/access/heap/heapam.c
+index 8d10d4d76a..b0d902d9f4 100644
+--- a/src/backend/access/heap/heapam.c
++++ b/src/backend/access/heap/heapam.c
+@@ -459,7 +459,7 @@ initscan(HeapScanDesc scan, ScanKey key, bool keep_startblock)
+ 		pgstat_count_heap_scan(scan->rs_base.rs_rd);
+ 
+ 	scan->rs_prefetch_block = InvalidBlockNumber;
+-	if (scan->pgsr)
++	if (!scan->pgsrFromExec && scan->pgsr)
+ 	{
+ 		pg_streaming_read_free(scan->pgsr);
+ 		scan->pgsr = NULL;
+@@ -468,15 +468,18 @@ initscan(HeapScanDesc scan, ScanKey key, bool keep_startblock)
+ 	/*
+ 	 * FIXME: This probably should be done in the !rs_inited blocks instead.
+ 	 */
+-	scan->pgsr = NULL;
+-	if (!RelationUsesLocalBuffers(scan->rs_base.rs_rd) &&
+-		(scan->rs_base.rs_flags & SO_TYPE_SEQSCAN))
+-	{
+-		if (scan->rs_base.rs_parallel)
+-			scan->pgsr = heap_pgsr_parallel_alloc(scan);
+-		else
+-			scan->pgsr = heap_pgsr_single_alloc(scan);
+-	}
++    if (!scan->pgsrFromExec)
++    {
++	    scan->pgsr = NULL;
++	    if (!RelationUsesLocalBuffers(scan->rs_base.rs_rd) &&
++		    (scan->rs_base.rs_flags & SO_TYPE_SEQSCAN))
++	    {
++		    if (scan->rs_base.rs_parallel)
++			    scan->pgsr = heap_pgsr_parallel_alloc(scan);
++		    else
++			    scan->pgsr = heap_pgsr_single_alloc(scan);
++	    }
++    }
+ }
+ 
+ /*
+@@ -541,10 +544,14 @@ heapgetpage(TableScanDesc sscan, BlockNumber page, Buffer pgsr_buffer)
+ 	{
+ 		Assert(scan->pgsr);
+ 		scan->rs_cbuf = pgsr_buffer;
++        //ReleaseBuffer(pgsr_buffer);
++        //scan->rs_cbuf = ReadBufferExtended(scan->rs_base.rs_rd, MAIN_FORKNUM, page,
++        //                                   RBM_NORMAL, scan->rs_strategy);
+ 	}
+ 	else
+ 	{
+-		Assert(!scan->pgsr);
++        // can happen with a valid pgsr but from Exec
++		Assert(scan->pgsrFromExec || !scan->pgsr);
+ 
+ 		/* read page using selected strategy */
+ 		scan->rs_cbuf = ReadBufferExtended(scan->rs_base.rs_rd, MAIN_FORKNUM, page,
+@@ -670,6 +677,7 @@ heapgettup(HeapScanDesc scan,
+ 	OffsetNumber lineoff;
+ 	int			linesleft;
+ 	ItemId		lpp;
++    clock_t     start, end;
+ 
+ 	/*
+ 	 * calculate next starting lineoff, given scan direction
+@@ -709,6 +717,8 @@ heapgettup(HeapScanDesc scan,
+ 
+ 				pgsr_buf = pg_streaming_read_get_next(scan->pgsr);
+ 
++                start = clock();
++
+ 				/* Other processes might have already finished the scan. */
+ 				if (scan->rs_base.rs_parallel != NULL)
+ 				{
+@@ -722,9 +732,22 @@ heapgettup(HeapScanDesc scan,
+ 				}
+ 				else
+ 				{
+-					Assert(BufferGetBlockNumber(pgsr_buf) == scan->rs_startblock);
+-					page = scan->rs_startblock; /* crosscheck */
++                    // can fail if pgsr set in exec and readahead is not start block of this relation
++					Assert(scan->pgsrFromExec || BufferGetBlockNumber(pgsr_buf) == scan->rs_startblock);
++
++                    if (scan->pgsrFromExec && BufferIsValid(pgsr_buf) && !CheckBufferWithTag(pgsr_buf, scan->rs_base.rs_rd, scan->rs_startblock))
++                    {
++                        //ReleaseBuffer(pgsr_buf);
++                        pg_streaming_read_increment_discarded(scan->pgsr);
++                        pgsr_buf = InvalidBuffer;
++                    }
++
++                    page = scan->rs_startblock;
+ 				}
++
++                end = clock();
++                pg_streaming_discard_time_add(scan->pgsr, start, end);
++
+ 			}
+ 			else if (scan->rs_base.rs_parallel != NULL)
+ 			{
+@@ -775,7 +798,7 @@ heapgettup(HeapScanDesc scan,
+ 		/* backward parallel scan not supported */
+ 		Assert(scan->rs_base.rs_parallel == NULL);
+ 
+-		if (scan->pgsr)
++		if (!scan->pgsrFromExec && scan->pgsr)
+ 		{
+ 			pg_streaming_read_free(scan->pgsr);
+ 			scan->pgsr = NULL;
+@@ -957,17 +980,36 @@ heapgettup(HeapScanDesc scan,
+ 		}
+ 		else if (scan->pgsr)
+ 		{
+-			pgsr_buf = pg_streaming_read_get_next(scan->pgsr);
++            page++;
++            if (page >= scan->rs_nblocks)
++                page = 0;
++            finished = (page == scan->rs_startblock) ||
++                (scan->rs_numblocks != InvalidBlockNumber ? --scan->rs_numblocks == 0 : false);
++
++            if (scan->rs_base.rs_flags & SO_ALLOW_SYNC)
++                ss_report_location(scan->rs_base.rs_rd, page);
++
++            if (!finished)
++			    pgsr_buf = pg_streaming_read_get_next(scan->pgsr);
++
++            start = clock;
+ 
+ 			if (BufferIsValid(pgsr_buf))
+ 			{
+-				page = BufferGetBlockNumber(pgsr_buf);
+-				/* FIXME: add crosscheck for block number */
+-				/* FIXME: ss_report_location */
+-				finished = false;
++                if (scan->pgsrFromExec && BufferIsValid(pgsr_buf) && !CheckBufferWithTag(pgsr_buf, scan->rs_base.rs_rd, page))
++                {
++                    //ReleaseBuffer(pgsr_buf);
++                    pg_streaming_read_increment_discarded(scan->pgsr);
++                    pgsr_buf = InvalidBuffer;
++                }
++                else
++                {
++				    page = BufferGetBlockNumber(pgsr_buf);
++                }
+ 			}
+-			else
+-				finished = true;
++
++            end = clock();
++            pg_streaming_discard_time_add(scan->pgsr, start, end);
+ 		}
+ 		else if (scan->rs_base.rs_parallel != NULL)
+ 		{
+@@ -1069,6 +1111,7 @@ heapgettup_pagemode(HeapScanDesc scan,
+ 	OffsetNumber lineoff;
+ 	int			linesleft;
+ 	ItemId		lpp;
++    clock_t     start, end;
+ 
+ 	/*
+ 	 * calculate next starting lineindex, given scan direction
+@@ -1102,6 +1145,8 @@ heapgettup_pagemode(HeapScanDesc scan,
+ 
+ 				pgsr_buf = pg_streaming_read_get_next(scan->pgsr);
+ 
++                start = clock();
++
+ 				/* Other processes might have already finished the scan. */
+ 				if (scan->rs_base.rs_parallel != NULL)
+ 				{
+@@ -1115,9 +1160,25 @@ heapgettup_pagemode(HeapScanDesc scan,
+ 				}
+ 				else
+ 				{
+-					Assert(BufferGetBlockNumber(pgsr_buf) == scan->rs_startblock);
+-					page = scan->rs_startblock; /* crosscheck */
++                    if (BufferIsValid(pgsr_buf))
++                    {
++                        // can fail if pgsr set in exec and readahead is not start block of this relation
++					    Assert(scan->pgsrFromExec || BufferGetBlockNumber(pgsr_buf) == scan->rs_startblock);
++
++                        if (scan->pgsrFromExec && BufferIsValid(pgsr_buf) && !CheckBufferWithTag(pgsr_buf, scan->rs_base.rs_rd, scan->rs_startblock))
++                        {
++                            //ReleaseBuffer(pgsr_buf);
++                            pg_streaming_read_increment_discarded(scan->pgsr);
++                            pgsr_buf = InvalidBuffer;
++                        }
++                    }
++
++                    page = scan->rs_startblock;
+ 				}
++
++                end = clock();
++                pg_streaming_discard_time_add(scan->pgsr, start, end);
++
+ 			}
+ 			else if (scan->rs_base.rs_parallel != NULL)
+ 			{
+@@ -1164,7 +1225,7 @@ heapgettup_pagemode(HeapScanDesc scan,
+ 		/* backward parallel scan not supported */
+ 		Assert(scan->rs_base.rs_parallel == NULL);
+ 
+-		if (scan->pgsr)
++		if (!scan->pgsrFromExec && scan->pgsr)
+ 		{
+ 			pg_streaming_read_free(scan->pgsr);
+ 			scan->pgsr = NULL;
+@@ -1321,17 +1382,36 @@ heapgettup_pagemode(HeapScanDesc scan,
+ 		}
+ 		else if (scan->pgsr)
+ 		{
+-			pgsr_buf = pg_streaming_read_get_next(scan->pgsr);
++            page++;
++            if (page >= scan->rs_nblocks)
++                page = 0;
++            finished = (page == scan->rs_startblock) ||
++                (scan->rs_numblocks != InvalidBlockNumber ? --scan->rs_numblocks == 0 : false);
++
++            if (scan->rs_base.rs_flags & SO_ALLOW_SYNC)
++                ss_report_location(scan->rs_base.rs_rd, page);
++
++            if (!finished)
++			    pgsr_buf = pg_streaming_read_get_next(scan->pgsr);
++
++            start = clock();
+ 
+ 			if (BufferIsValid(pgsr_buf))
+ 			{
+-				page = BufferGetBlockNumber(pgsr_buf);
+-				/* FIXME: add crosscheck for block number */
+-				/* FIXME: ss_report_location */
+-				finished = false;
++                if (scan->pgsrFromExec && BufferIsValid(pgsr_buf) && !CheckBufferWithTag(pgsr_buf, scan->rs_base.rs_rd, page))
++                {
++                    //ReleaseBuffer(pgsr_buf);
++                    pg_streaming_read_increment_discarded(scan->pgsr);
++                    pgsr_buf = InvalidBuffer;
++                }
++                else
++                {
++                    page = BufferGetBlockNumber(pgsr_buf);
++                }
+ 			}
+-			else
+-				finished = true;
++
++            end = clock();
++            pg_streaming_discard_time_add(scan->pgsr, start, end);
+ 		}
+ 		else if (scan->rs_base.rs_parallel != NULL)
+ 		{
+@@ -1406,7 +1486,8 @@ TableScanDesc
+ heap_beginscan(Relation relation, Snapshot snapshot,
+ 			   int nkeys, ScanKey key,
+ 			   ParallelTableScanDesc parallel_scan,
+-			   uint32 flags)
++			   uint32 flags,
++               PgStreamingRead *pgsr)
+ {
+ 	HeapScanDesc scan;
+ 
+@@ -1431,7 +1512,16 @@ heap_beginscan(Relation relation, Snapshot snapshot,
+ 	scan->rs_base.rs_parallel = parallel_scan;
+ 	scan->rs_strategy = NULL;	/* set in initscan */
+ 
+-	scan->pgsr = NULL;
++    if (pgsr)
++    {
++        scan->pgsr = pgsr;
++        scan->pgsrFromExec = true;
++    }
++    else
++    {
++	    scan->pgsr = NULL;
++        scan->pgsrFromExec = false;
++    }
+ 
+ 	/*
+ 	 * Disable page-at-a-time mode if it's not a MVCC-safe snapshot.
+@@ -1539,7 +1629,7 @@ heap_endscan(TableScanDesc sscan)
+ 	if (BufferIsValid(scan->rs_cbuf))
+ 		ReleaseBuffer(scan->rs_cbuf);
+ 
+-	if (scan->pgsr)
++	if (!scan->pgsrFromExec && scan->pgsr)
+ 	{
+ 		pg_streaming_read_free(scan->pgsr);
+ 		scan->pgsr = NULL;
+diff --git a/src/backend/access/heap/heapam_handler.c b/src/backend/access/heap/heapam_handler.c
+index cb29fb57fe..a083b993ec 100644
+--- a/src/backend/access/heap/heapam_handler.c
++++ b/src/backend/access/heap/heapam_handler.c
+@@ -113,11 +113,13 @@ heapam_index_fetch_tuple(struct IndexFetchTableData *scan,
+ 						 ItemPointer tid,
+ 						 Snapshot snapshot,
+ 						 TupleTableSlot *slot,
+-						 bool *call_again, bool *all_dead)
++						 bool *call_again, bool *all_dead,
++                         PgStreamingRead *pgsr)
+ {
+ 	IndexFetchHeapData *hscan = (IndexFetchHeapData *) scan;
+ 	BufferHeapTupleTableSlot *bslot = (BufferHeapTupleTableSlot *) slot;
+ 	bool		got_heap_tuple;
++    clock_t     start, end;
+ 
+ 	Assert(TTS_IS_BUFFERTUPLE(slot));
+ 
+@@ -126,10 +128,51 @@ heapam_index_fetch_tuple(struct IndexFetchTableData *scan,
+ 	{
+ 		/* Switch to correct buffer if we don't have it already */
+ 		Buffer		prev_buf = hscan->xs_cbuf;
+-
+-		hscan->xs_cbuf = ReleaseAndReadBuffer(hscan->xs_cbuf,
+-											  hscan->xs_base.rel,
+-											  ItemPointerGetBlockNumber(tid));
++        bool needToRead = true;
++
++        if (pgsr)
++        {
++            if (BufferIsValid(hscan->xs_cbuf))
++                if (CheckBufferWithTag(hscan->xs_cbuf, hscan->xs_base.rel, ItemPointerGetBlockNumber(tid)))
++                    needToRead = false;
++                else
++                {
++                    ReleaseBuffer(hscan->xs_cbuf);
++                    hscan->xs_cbuf = InvalidBuffer;
++                }
++
++            if (needToRead)
++            {
++                Buffer pgsr_buf = InvalidBuffer;
++                pgsr_buf = pg_streaming_read_get_next(pgsr);
++
++                start = clock();
++
++                if (BufferIsValid(pgsr_buf))
++                {
++                    if (CheckBufferWithTag(pgsr_buf, hscan->xs_base.rel, ItemPointerGetBlockNumber(tid)))
++                    {
++                        hscan->xs_cbuf = pgsr_buf;
++                        needToRead = false;
++                    }
++                    else
++                    {
++                        //ReleaseBuffer(pgsr_buf);
++                        pg_streaming_read_increment_discarded(pgsr);
++                    }
++                }
++
++                end = clock();
++                pg_streaming_discard_time_add(pgsr, start, end);
++            }
++        }
++
++        if (needToRead)
++        {
++            hscan->xs_cbuf = ReleaseAndReadBuffer(hscan->xs_cbuf,
++                                              hscan->xs_base.rel,
++                                              ItemPointerGetBlockNumber(tid));
++        }
+ 
+ 		/*
+ 		 * Prune page, but only if we weren't already on this page
+@@ -748,7 +791,7 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
+ 
+ 		tableScan = NULL;
+ 		heapScan = NULL;
+-		indexScan = index_beginscan(OldHeap, OldIndex, SnapshotAny, 0, 0);
++		indexScan = index_beginscan(OldHeap, OldIndex, SnapshotAny, 0, 0, NULL);
+ 		index_rescan(indexScan, NULL, 0, NULL, 0);
+ 	}
+ 	else
+@@ -757,7 +800,7 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
+ 		pgstat_progress_update_param(PROGRESS_CLUSTER_PHASE,
+ 									 PROGRESS_CLUSTER_PHASE_SEQ_SCAN_HEAP);
+ 
+-		tableScan = table_beginscan(OldHeap, SnapshotAny, 0, (ScanKey) NULL);
++		tableScan = table_beginscan(OldHeap, SnapshotAny, 0, (ScanKey) NULL, NULL);
+ 		heapScan = (HeapScanDesc) tableScan;
+ 		indexScan = NULL;
+ 
+@@ -2106,14 +2149,19 @@ heapam_estimate_rel_size(Relation rel, int32 *attr_widths,
+ 
+ static bool
+ heapam_scan_bitmap_next_block(TableScanDesc scan,
+-							  TBMIterateResult *tbmres)
++							  TBMIterateResult *tbmres,
++                              PgStreamingRead *pgsr)
+ {
+ 	HeapScanDesc hscan = (HeapScanDesc) scan;
+ 	BlockNumber page = tbmres->blockno;
+ 	Buffer		buffer;
+ 	Snapshot	snapshot;
+ 	int			ntup;
++    bool        needToRead = true;
++    clock_t     start, end;
+ 
++    hscan->pgsr = pgsr;
++    hscan->pgsrFromExec = true;
+ 	hscan->rs_cindex = 0;
+ 	hscan->rs_ntuples = 0;
+ 
+@@ -2126,12 +2174,54 @@ heapam_scan_bitmap_next_block(TableScanDesc scan,
+ 	if (page >= hscan->rs_nblocks)
+ 		return false;
+ 
++    if (pgsr)
++    {
++        if (BufferIsValid(hscan->rs_cbuf))
++            if (CheckBufferWithTag(hscan->rs_cbuf, scan->rs_rd, page))
++                needToRead = false;
++            else
++            {
++                ReleaseBuffer(hscan->rs_cbuf);
++                hscan->rs_cbuf = InvalidBuffer;
++            }
++
++        if (needToRead)
++        {
++            Buffer pgsr_buf = InvalidBuffer;
++            pgsr_buf = pg_streaming_read_get_next(pgsr);
++
++            start = clock();
++
++            if (BufferIsValid(pgsr_buf))
++            {
++                if (CheckBufferWithTag(pgsr_buf, scan->rs_rd, page))
++                {
++                    hscan->rs_cbuf = pgsr_buf;
++                    needToRead = false;
++                }
++                else
++                {
++                    //ReleaseBuffer(pgsr_buf);
++                    pg_streaming_read_increment_discarded(pgsr);
++                }
++            }
++
++            end = clock();
++            pg_streaming_discard_time_add(pgsr, start, end);
++        }
++    }
++            
++
+ 	/*
+ 	 * Acquire pin on the target heap page, trading in any pin we held before.
+ 	 */
+-	hscan->rs_cbuf = ReleaseAndReadBuffer(hscan->rs_cbuf,
+-										  scan->rs_rd,
+-										  page);
++    if (needToRead)
++    {
++	    hscan->rs_cbuf = ReleaseAndReadBuffer(hscan->rs_cbuf,
++		    								  scan->rs_rd,
++		    								  page);
++    }
++
+ 	hscan->rs_cblock = page;
+ 	buffer = hscan->rs_cbuf;
+ 	snapshot = scan->rs_snapshot;
+diff --git a/src/backend/access/heap/vacuumlazy.c b/src/backend/access/heap/vacuumlazy.c
+index 26991d68ef..1ddae588ee 100644
+--- a/src/backend/access/heap/vacuumlazy.c
++++ b/src/backend/access/heap/vacuumlazy.c
+@@ -1073,7 +1073,7 @@ lazy_scan_heap(LVRelState *vacrel)
+ 		 * FIXME: deduplicate
+ 		 */
+ 		if (vacrel->aggressive &&
+-			VM_ALL_VISIBLE(vacrel->rel, blkno, &vacrel->vmbuffer_data))
++			VM_ALL_VISIBLE(vacrel->rel, blkno, &vacrel->vmbuffer_data, NULL))
+ 			all_visible_according_to_vm = true;
+ 
+ 		/*
+@@ -1258,7 +1258,7 @@ lazy_scan_heap(LVRelState *vacrel)
+ 		 * with buffer lock before concluding that the VM is corrupt.
+ 		 */
+ 		else if (all_visible_according_to_vm && !PageIsAllVisible(page)
+-				 && VM_ALL_VISIBLE(vacrel->rel, blkno, &vacrel->vmbuffer_data))
++				 && VM_ALL_VISIBLE(vacrel->rel, blkno, &vacrel->vmbuffer_data, NULL))
+ 		{
+ 			elog(WARNING, "page is not marked all-visible but visibility map bit is set in relation \"%s\" page %u",
+ 				 vacrel->relname, blkno);
+@@ -1298,7 +1298,7 @@ lazy_scan_heap(LVRelState *vacrel)
+ 		 */
+ 		else if (all_visible_according_to_vm && prunestate.all_visible &&
+ 				 prunestate.all_frozen &&
+-				 !VM_ALL_FROZEN(vacrel->rel, blkno, &vacrel->vmbuffer_data))
++				 !VM_ALL_FROZEN(vacrel->rel, blkno, &vacrel->vmbuffer_data, NULL))
+ 		{
+ 			/*
+ 			 * We can pass InvalidTransactionId as the cutoff XID here,
+@@ -1434,7 +1434,7 @@ lazy_scan_skip(LVRelState *vacrel, Buffer *vmbuffer, BlockNumber next_block,
+ 	{
+ 		uint8		mapbits = visibilitymap_get_status(vacrel->rel,
+ 													   next_unskippable_block,
+-													   vmbuffer);
++													   vmbuffer, NULL);
+ 
+ 		if ((mapbits & VISIBILITYMAP_ALL_VISIBLE) == 0)
+ 		{
+@@ -2765,7 +2765,7 @@ lazy_vacuum_heap_page(LVRelState *vacrel, BlockNumber blkno, Buffer buffer,
+ 	{
+ 		uint8		flags = 0;
+ 		uint8		vm_status = visibilitymap_get_status(vacrel->rel,
+-														 blkno, vmbuffer);
++														 blkno, vmbuffer, NULL);
+ 
+ 		/* Set the VM all-frozen bit to flag, if needed */
+ 		if ((vm_status & VISIBILITYMAP_ALL_VISIBLE) == 0)
+diff --git a/src/backend/access/heap/visibilitymap.c b/src/backend/access/heap/visibilitymap.c
+index d62761728b..8fe8c2ff63 100644
+--- a/src/backend/access/heap/visibilitymap.c
++++ b/src/backend/access/heap/visibilitymap.c
+@@ -328,13 +328,14 @@ visibilitymap_set(Relation rel, BlockNumber heapBlk, Buffer heapBuf,
+  * all concurrency issues!
+  */
+ uint8
+-visibilitymap_get_status(Relation rel, BlockNumber heapBlk, Buffer *vmbuf)
++visibilitymap_get_status(Relation rel, BlockNumber heapBlk, Buffer *vmbuf, PgStreamingRead *pgsr)
+ {
+ 	BlockNumber mapBlock = HEAPBLK_TO_MAPBLOCK(heapBlk);
+ 	uint32		mapByte = HEAPBLK_TO_MAPBYTE(heapBlk);
+ 	uint8		mapOffset = HEAPBLK_TO_OFFSET(heapBlk);
+ 	char	   *map;
+ 	uint8		result;
++    Buffer      pgsr_buf = InvalidBuffer;
+ 
+ #ifdef TRACE_VISIBILITYMAP
+ 	elog(DEBUG1, "vm_get_status %s %d", RelationGetRelationName(rel), heapBlk);
+@@ -352,7 +353,41 @@ visibilitymap_get_status(Relation rel, BlockNumber heapBlk, Buffer *vmbuf)
+ 
+ 	if (!BufferIsValid(*vmbuf))
+ 	{
+-		*vmbuf = vm_readbuf(rel, mapBlock, false);
++        if (pgsr)
++        {
++            pgsr_buf = pg_streaming_read_get_next(pgsr);
++
++            /*
++            ** Ignore the prefetched block
++            **
++            ** Special Case
++            ** Prefetched page is MAIN_FORKNUM (no support for other forks yet)
++            ** Required page is VISIBILITYMAP_FORKNUM
++            */
++            if (BufferIsValid(pgsr_buf))
++            {
++                //ReleaseBuffer(pgsr_buf);
++                pg_streaming_read_increment_discarded(pgsr);
++            }
++        }
++
++        /*
++        if (BufferIsValid(pgsr_buf))
++        {
++            if (CheckBufferWithTag(pgsr_buf, rel, mapBlock))
++            {
++                *vmbuf = pgsr_buf;
++            }
++            else
++            {
++                ReleaseBuffer(pgsr_buf);
++                *vmbuf = vm_readbuf(rel, mapBlock, false);
++            }
++        }
++        else
++        */
++        *vmbuf = vm_readbuf(rel, mapBlock, false);
++
+ 		if (!BufferIsValid(*vmbuf))
+ 			return false;
+ 	}
+diff --git a/src/backend/access/index/genam.c b/src/backend/access/index/genam.c
+index 98af5347b9..414c7d927c 100644
+--- a/src/backend/access/index/genam.c
++++ b/src/backend/access/index/genam.c
+@@ -440,7 +440,7 @@ systable_beginscan(Relation heapRelation,
+ 		}
+ 
+ 		sysscan->iscan = index_beginscan(heapRelation, irel,
+-										 snapshot, nkeys, 0);
++										 snapshot, nkeys, 0, NULL);
+ 		index_rescan(sysscan->iscan, key, nkeys, NULL, 0);
+ 		sysscan->scan = NULL;
+ 	}
+@@ -696,7 +696,7 @@ systable_beginscan_ordered(Relation heapRelation,
+ 	}
+ 
+ 	sysscan->iscan = index_beginscan(heapRelation, indexRelation,
+-									 snapshot, nkeys, 0);
++									 snapshot, nkeys, 0, NULL);
+ 	index_rescan(sysscan->iscan, key, nkeys, NULL, 0);
+ 	sysscan->scan = NULL;
+ 
+diff --git a/src/backend/access/index/indexam.c b/src/backend/access/index/indexam.c
+index fe80b8b0ba..9adcf575ca 100644
+--- a/src/backend/access/index/indexam.c
++++ b/src/backend/access/index/indexam.c
+@@ -205,7 +205,8 @@ IndexScanDesc
+ index_beginscan(Relation heapRelation,
+ 				Relation indexRelation,
+ 				Snapshot snapshot,
+-				int nkeys, int norderbys)
++				int nkeys, int norderbys,
++                PgStreamingRead *pgsr)
+ {
+ 	IndexScanDesc scan;
+ 
+@@ -218,6 +219,15 @@ index_beginscan(Relation heapRelation,
+ 	scan->heapRelation = heapRelation;
+ 	scan->xs_snapshot = snapshot;
+ 
++    if (pgsr)
++    {
++        scan->pgsr = pgsr;
++    }
++    else
++    {
++        scan->pgsr = NULL;
++    }
++
+ 	/* prepare to fetch index matches from table */
+ 	scan->xs_heapfetch = table_index_fetch_begin(heapRelation);
+ 
+@@ -579,7 +589,7 @@ index_fetch_heap(IndexScanDesc scan, TupleTableSlot *slot)
+ 
+ 	found = table_index_fetch_tuple(scan->xs_heapfetch, &scan->xs_heaptid,
+ 									scan->xs_snapshot, slot,
+-									&scan->xs_heap_continue, &all_dead);
++									&scan->xs_heap_continue, &all_dead, scan->pgsr);
+ 
+ 	if (found)
+ 		pgstat_count_heap_fetch(scan->indexRelation);
+diff --git a/src/backend/access/nbtree/nbtinsert.c b/src/backend/access/nbtree/nbtinsert.c
+index f6f4af8bfe..3d50e1ed3e 100644
+--- a/src/backend/access/nbtree/nbtinsert.c
++++ b/src/backend/access/nbtree/nbtinsert.c
+@@ -376,7 +376,7 @@ _bt_search_insert(Relation rel, BTInsertState insertstate)
+ 
+ 	/* Cannot use optimization -- descend tree, return proper descent stack */
+ 	return _bt_search(rel, insertstate->itup_key, &insertstate->buf, BT_WRITE,
+-					  NULL);
++					  NULL, NULL);
+ }
+ 
+ /*
+@@ -731,7 +731,7 @@ _bt_check_unique(Relation rel, BTInsertState insertstate, Relation heapRel,
+ 			{
+ 				BlockNumber nblkno = opaque->btpo_next;
+ 
+-				nbuf = _bt_relandgetbuf(rel, nbuf, nblkno, BT_READ);
++				nbuf = _bt_relandgetbuf(rel, nbuf, nblkno, BT_READ, InvalidBuffer);
+ 				page = BufferGetPage(nbuf);
+ 				opaque = BTPageGetOpaque(page);
+ 				if (!P_IGNORE(opaque))
+@@ -1036,7 +1036,7 @@ _bt_stepright(Relation rel, BTInsertState insertstate, BTStack stack)
+ 	rblkno = opaque->btpo_next;
+ 	for (;;)
+ 	{
+-		rbuf = _bt_relandgetbuf(rel, rbuf, rblkno, BT_WRITE);
++		rbuf = _bt_relandgetbuf(rel, rbuf, rblkno, BT_WRITE, InvalidBuffer);
+ 		page = BufferGetPage(rbuf);
+ 		opaque = BTPageGetOpaque(page);
+ 
+@@ -1254,7 +1254,7 @@ _bt_insertonpg(Relation rel,
+ 			Assert(!isleaf);
+ 			Assert(BufferIsValid(cbuf));
+ 
+-			metabuf = _bt_getbuf(rel, BTREE_METAPAGE, BT_WRITE);
++			metabuf = _bt_getbuf(rel, BTREE_METAPAGE, BT_WRITE, InvalidBuffer);
+ 			metapg = BufferGetPage(metabuf);
+ 			metad = BTPageGetMeta(metapg);
+ 
+@@ -1712,7 +1712,7 @@ _bt_split(Relation rel, BTScanInsert itup_key, Buffer buf, Buffer cbuf,
+ 	 * way because it avoids an unnecessary PANIC when either origpage or its
+ 	 * existing sibling page are corrupt.
+ 	 */
+-	rbuf = _bt_getbuf(rel, P_NEW, BT_WRITE);
++	rbuf = _bt_getbuf(rel, P_NEW, BT_WRITE, InvalidBuffer);
+ 	rightpage = BufferGetPage(rbuf);
+ 	rightpagenumber = BufferGetBlockNumber(rbuf);
+ 	/* rightpage was initialized by _bt_getbuf */
+@@ -1885,7 +1885,7 @@ _bt_split(Relation rel, BTScanInsert itup_key, Buffer buf, Buffer cbuf,
+ 	 */
+ 	if (!isrightmost)
+ 	{
+-		sbuf = _bt_getbuf(rel, oopaque->btpo_next, BT_WRITE);
++		sbuf = _bt_getbuf(rel, oopaque->btpo_next, BT_WRITE, InvalidBuffer);
+ 		spage = BufferGetPage(sbuf);
+ 		sopaque = BTPageGetOpaque(spage);
+ 		if (sopaque->btpo_prev != origpagenumber)
+@@ -2157,7 +2157,7 @@ _bt_insert_parent(Relation rel,
+ 					 BlockNumberIsValid(RelationGetTargetBlock(rel))));
+ 
+ 			/* Find the leftmost page at the next level up */
+-			pbuf = _bt_get_endpoint(rel, opaque->btpo_level + 1, false, NULL);
++			pbuf = _bt_get_endpoint(rel, opaque->btpo_level + 1, false, NULL, NULL);
+ 			/* Set up a phony stack entry pointing there */
+ 			stack = &fakestack;
+ 			stack->bts_blkno = BufferGetBlockNumber(pbuf);
+@@ -2240,7 +2240,7 @@ _bt_finish_split(Relation rel, Buffer lbuf, BTStack stack)
+ 	Assert(P_INCOMPLETE_SPLIT(lpageop));
+ 
+ 	/* Lock right sibling, the one missing the downlink */
+-	rbuf = _bt_getbuf(rel, lpageop->btpo_next, BT_WRITE);
++	rbuf = _bt_getbuf(rel, lpageop->btpo_next, BT_WRITE, InvalidBuffer);
+ 	rpage = BufferGetPage(rbuf);
+ 	rpageop = BTPageGetOpaque(rpage);
+ 
+@@ -2252,7 +2252,7 @@ _bt_finish_split(Relation rel, Buffer lbuf, BTStack stack)
+ 		BTMetaPageData *metad;
+ 
+ 		/* acquire lock on the metapage */
+-		metabuf = _bt_getbuf(rel, BTREE_METAPAGE, BT_WRITE);
++		metabuf = _bt_getbuf(rel, BTREE_METAPAGE, BT_WRITE, InvalidBuffer);
+ 		metapg = BufferGetPage(metabuf);
+ 		metad = BTPageGetMeta(metapg);
+ 
+@@ -2318,7 +2318,7 @@ _bt_getstackbuf(Relation rel, BTStack stack, BlockNumber child)
+ 		Page		page;
+ 		BTPageOpaque opaque;
+ 
+-		buf = _bt_getbuf(rel, blkno, BT_WRITE);
++		buf = _bt_getbuf(rel, blkno, BT_WRITE, InvalidBuffer);
+ 		page = BufferGetPage(buf);
+ 		opaque = BTPageGetOpaque(page);
+ 
+@@ -2454,12 +2454,12 @@ _bt_newroot(Relation rel, Buffer lbuf, Buffer rbuf)
+ 	lopaque = BTPageGetOpaque(lpage);
+ 
+ 	/* get a new root page */
+-	rootbuf = _bt_getbuf(rel, P_NEW, BT_WRITE);
++	rootbuf = _bt_getbuf(rel, P_NEW, BT_WRITE, InvalidBuffer);
+ 	rootpage = BufferGetPage(rootbuf);
+ 	rootblknum = BufferGetBlockNumber(rootbuf);
+ 
+ 	/* acquire lock on the metapage */
+-	metabuf = _bt_getbuf(rel, BTREE_METAPAGE, BT_WRITE);
++	metabuf = _bt_getbuf(rel, BTREE_METAPAGE, BT_WRITE, InvalidBuffer);
+ 	metapg = BufferGetPage(metabuf);
+ 	metad = BTPageGetMeta(metapg);
+ 
+diff --git a/src/backend/access/nbtree/nbtpage.c b/src/backend/access/nbtree/nbtpage.c
+index 8b96708b3e..df69ed9176 100644
+--- a/src/backend/access/nbtree/nbtpage.c
++++ b/src/backend/access/nbtree/nbtpage.c
+@@ -191,7 +191,7 @@ _bt_vacuum_needs_cleanup(Relation rel)
+ 	 *
+ 	 * Note that we deliberately avoid using cached version of metapage here.
+ 	 */
+-	metabuf = _bt_getbuf(rel, BTREE_METAPAGE, BT_READ);
++	metabuf = _bt_getbuf(rel, BTREE_METAPAGE, BT_READ, InvalidBuffer);
+ 	metapg = BufferGetPage(metabuf);
+ 	metad = BTPageGetMeta(metapg);
+ 	btm_version = metad->btm_version;
+@@ -255,7 +255,7 @@ _bt_set_cleanup_info(Relation rel, BlockNumber num_delpages)
+ 	 * no longer used as of PostgreSQL 14.  We set it to -1.0 on rewrite, just
+ 	 * to be consistent.
+ 	 */
+-	metabuf = _bt_getbuf(rel, BTREE_METAPAGE, BT_READ);
++	metabuf = _bt_getbuf(rel, BTREE_METAPAGE, BT_READ, InvalidBuffer);
+ 	metapg = BufferGetPage(metabuf);
+ 	metad = BTPageGetMeta(metapg);
+ 
+@@ -340,7 +340,7 @@ _bt_set_cleanup_info(Relation rel, BlockNumber num_delpages)
+  *		The metadata page is not locked or pinned on exit.
+  */
+ Buffer
+-_bt_getroot(Relation rel, int access)
++_bt_getroot(Relation rel, int access, Buffer pgsr_buf)
+ {
+ 	Buffer		metabuf;
+ 	Buffer		rootbuf;
+@@ -370,7 +370,7 @@ _bt_getroot(Relation rel, int access)
+ 		Assert(rootblkno != P_NONE);
+ 		rootlevel = metad->btm_fastlevel;
+ 
+-		rootbuf = _bt_getbuf(rel, rootblkno, BT_READ);
++		rootbuf = _bt_getbuf(rel, rootblkno, BT_READ, pgsr_buf);
+ 		rootpage = BufferGetPage(rootbuf);
+ 		rootopaque = BTPageGetOpaque(rootpage);
+ 
+@@ -396,7 +396,7 @@ _bt_getroot(Relation rel, int access)
+ 		rel->rd_amcache = NULL;
+ 	}
+ 
+-	metabuf = _bt_getbuf(rel, BTREE_METAPAGE, BT_READ);
++	metabuf = _bt_getbuf(rel, BTREE_METAPAGE, BT_READ, InvalidBuffer);
+ 	metad = _bt_getmeta(rel, metabuf);
+ 
+ 	/* if no root page initialized yet, do it */
+@@ -429,7 +429,7 @@ _bt_getroot(Relation rel, int access)
+ 			 * to optimize this case.)
+ 			 */
+ 			_bt_relbuf(rel, metabuf);
+-			return _bt_getroot(rel, access);
++			return _bt_getroot(rel, access, InvalidBuffer);
+ 		}
+ 
+ 		/*
+@@ -437,7 +437,7 @@ _bt_getroot(Relation rel, int access)
+ 		 * the new root page.  Since this is the first page in the tree, it's
+ 		 * a leaf as well as the root.
+ 		 */
+-		rootbuf = _bt_getbuf(rel, P_NEW, BT_WRITE);
++		rootbuf = _bt_getbuf(rel, P_NEW, BT_WRITE, InvalidBuffer);
+ 		rootblkno = BufferGetBlockNumber(rootbuf);
+ 		rootpage = BufferGetPage(rootbuf);
+ 		rootopaque = BTPageGetOpaque(rootpage);
+@@ -532,7 +532,7 @@ _bt_getroot(Relation rel, int access)
+ 
+ 		for (;;)
+ 		{
+-			rootbuf = _bt_relandgetbuf(rel, rootbuf, rootblkno, BT_READ);
++			rootbuf = _bt_relandgetbuf(rel, rootbuf, rootblkno, BT_READ, InvalidBuffer);
+ 			rootpage = BufferGetPage(rootbuf);
+ 			rootopaque = BTPageGetOpaque(rootpage);
+ 
+@@ -596,7 +596,7 @@ _bt_gettrueroot(Relation rel)
+ 		pfree(rel->rd_amcache);
+ 	rel->rd_amcache = NULL;
+ 
+-	metabuf = _bt_getbuf(rel, BTREE_METAPAGE, BT_READ);
++	metabuf = _bt_getbuf(rel, BTREE_METAPAGE, BT_READ, InvalidBuffer);
+ 	metapg = BufferGetPage(metabuf);
+ 	metaopaque = BTPageGetOpaque(metapg);
+ 	metad = BTPageGetMeta(metapg);
+@@ -635,7 +635,7 @@ _bt_gettrueroot(Relation rel)
+ 
+ 	for (;;)
+ 	{
+-		rootbuf = _bt_relandgetbuf(rel, rootbuf, rootblkno, BT_READ);
++		rootbuf = _bt_relandgetbuf(rel, rootbuf, rootblkno, BT_READ, InvalidBuffer);
+ 		rootpage = BufferGetPage(rootbuf);
+ 		rootopaque = BTPageGetOpaque(rootpage);
+ 
+@@ -677,7 +677,7 @@ _bt_getrootheight(Relation rel)
+ 	{
+ 		Buffer		metabuf;
+ 
+-		metabuf = _bt_getbuf(rel, BTREE_METAPAGE, BT_READ);
++		metabuf = _bt_getbuf(rel, BTREE_METAPAGE, BT_READ, InvalidBuffer);
+ 		metad = _bt_getmeta(rel, metabuf);
+ 
+ 		/*
+@@ -741,7 +741,7 @@ _bt_metaversion(Relation rel, bool *heapkeyspace, bool *allequalimage)
+ 	{
+ 		Buffer		metabuf;
+ 
+-		metabuf = _bt_getbuf(rel, BTREE_METAPAGE, BT_READ);
++		metabuf = _bt_getbuf(rel, BTREE_METAPAGE, BT_READ, InvalidBuffer);
+ 		metad = _bt_getmeta(rel, metabuf);
+ 
+ 		/*
+@@ -868,14 +868,28 @@ _bt_log_reuse_page(Relation rel, BlockNumber blkno, FullTransactionId safexid)
+  *		as _bt_lockbuf().
+  */
+ Buffer
+-_bt_getbuf(Relation rel, BlockNumber blkno, int access)
++_bt_getbuf(Relation rel, BlockNumber blkno, int access, Buffer pgsr_buf)
+ {
+ 	Buffer		buf;
+ 
+ 	if (blkno != P_NEW)
+ 	{
+ 		/* Read an existing block of the relation */
+-		buf = ReadBuffer(rel, blkno);
++        if (BufferIsValid(pgsr_buf))
++        {
++            if (CheckBufferWithTag(pgsr_buf, rel, blkno))
++            {
++                buf = pgsr_buf;
++            }
++            else
++            {
++                //ReleaseBuffer(pgsr_buf);
++                buf = ReadBuffer(rel, blkno);
++            }
++        }
++        else
++            buf = ReadBuffer(rel, blkno);
++
+ 		_bt_lockbuf(rel, buf, access);
+ 		_bt_checkpage(rel, buf);
+ 	}
+@@ -1012,14 +1026,30 @@ _bt_getbuf(Relation rel, BlockNumber blkno, int access)
+  * is when the target page is the same one already in the buffer.
+  */
+ Buffer
+-_bt_relandgetbuf(Relation rel, Buffer obuf, BlockNumber blkno, int access)
++_bt_relandgetbuf(Relation rel, Buffer obuf, BlockNumber blkno, int access, Buffer pgsr_buf)
+ {
+ 	Buffer		buf;
+ 
+ 	Assert(blkno != P_NEW);
+ 	if (BufferIsValid(obuf))
+ 		_bt_unlockbuf(rel, obuf);
+-	buf = ReleaseAndReadBuffer(obuf, rel, blkno);
++
++    if (BufferIsValid(pgsr_buf))
++    {
++        if (CheckBufferWithTag(pgsr_buf, rel, blkno))
++        {
++            ReleaseBuffer(obuf);
++            buf = pgsr_buf;
++        }
++        else
++        {
++            //ReleaseBuffer(pgsr_buf);
++            buf = ReleaseAndReadBuffer(obuf, rel, blkno);
++        }
++    }
++    else
++        buf = ReleaseAndReadBuffer(obuf, rel, blkno);
++
+ 	_bt_lockbuf(rel, buf, access);
+ 
+ 	_bt_checkpage(rel, buf);
+@@ -1716,7 +1746,7 @@ _bt_leftsib_splitflag(Relation rel, BlockNumber leftsib, BlockNumber target)
+ 	if (leftsib == P_NONE)
+ 		return false;
+ 
+-	buf = _bt_getbuf(rel, leftsib, BT_READ);
++	buf = _bt_getbuf(rel, leftsib, BT_READ, InvalidBuffer);
+ 	page = BufferGetPage(buf);
+ 	opaque = BTPageGetOpaque(page);
+ 
+@@ -1771,7 +1801,7 @@ _bt_rightsib_halfdeadflag(Relation rel, BlockNumber leafrightsib)
+ 
+ 	Assert(leafrightsib != P_NONE);
+ 
+-	buf = _bt_getbuf(rel, leafrightsib, BT_READ);
++	buf = _bt_getbuf(rel, leafrightsib, BT_READ, InvalidBuffer);
+ 	page = BufferGetPage(buf);
+ 	opaque = BTPageGetOpaque(page);
+ 
+@@ -1970,7 +2000,7 @@ _bt_pagedel(Relation rel, Buffer leafbuf, BTVacState *vstate)
+ 				itup_key = _bt_mkscankey(rel, targetkey);
+ 				/* find the leftmost leaf page with matching pivot/high key */
+ 				itup_key->pivotsearch = true;
+-				stack = _bt_search(rel, itup_key, &sleafbuf, BT_READ, NULL);
++				stack = _bt_search(rel, itup_key, &sleafbuf, BT_READ, NULL, NULL);
+ 				/* won't need a second lock or pin on leafbuf */
+ 				_bt_relbuf(rel, sleafbuf);
+ 
+@@ -2064,7 +2094,7 @@ _bt_pagedel(Relation rel, Buffer leafbuf, BTVacState *vstate)
+ 		if (!rightsib_empty)
+ 			break;
+ 
+-		leafbuf = _bt_getbuf(rel, rightsib, BT_WRITE);
++		leafbuf = _bt_getbuf(rel, rightsib, BT_WRITE, InvalidBuffer);
+ 	}
+ }
+ 
+@@ -2362,7 +2392,7 @@ _bt_unlink_halfdead_page(Relation rel, Buffer leafbuf, BlockNumber scanblkno,
+ 		Assert(target != leafblkno);
+ 
+ 		/* Fetch the block number of the target's left sibling */
+-		buf = _bt_getbuf(rel, target, BT_READ);
++		buf = _bt_getbuf(rel, target, BT_READ, InvalidBuffer);
+ 		page = BufferGetPage(buf);
+ 		opaque = BTPageGetOpaque(page);
+ 		leftsib = opaque->btpo_prev;
+@@ -2389,7 +2419,7 @@ _bt_unlink_halfdead_page(Relation rel, Buffer leafbuf, BlockNumber scanblkno,
+ 		_bt_lockbuf(rel, leafbuf, BT_WRITE);
+ 	if (leftsib != P_NONE)
+ 	{
+-		lbuf = _bt_getbuf(rel, leftsib, BT_WRITE);
++		lbuf = _bt_getbuf(rel, leftsib, BT_WRITE, InvalidBuffer);
+ 		page = BufferGetPage(lbuf);
+ 		opaque = BTPageGetOpaque(page);
+ 		while (P_ISDELETED(opaque) || opaque->btpo_next != target)
+@@ -2439,7 +2469,7 @@ _bt_unlink_halfdead_page(Relation rel, Buffer leafbuf, BlockNumber scanblkno,
+ 			CHECK_FOR_INTERRUPTS();
+ 
+ 			/* step right one page */
+-			lbuf = _bt_getbuf(rel, leftsib, BT_WRITE);
++			lbuf = _bt_getbuf(rel, leftsib, BT_WRITE, InvalidBuffer);
+ 			page = BufferGetPage(lbuf);
+ 			opaque = BTPageGetOpaque(page);
+ 		}
+@@ -2503,7 +2533,7 @@ _bt_unlink_halfdead_page(Relation rel, Buffer leafbuf, BlockNumber scanblkno,
+ 	 * And next write-lock the (current) right sibling.
+ 	 */
+ 	rightsib = opaque->btpo_next;
+-	rbuf = _bt_getbuf(rel, rightsib, BT_WRITE);
++	rbuf = _bt_getbuf(rel, rightsib, BT_WRITE, InvalidBuffer);
+ 	page = BufferGetPage(rbuf);
+ 	opaque = BTPageGetOpaque(page);
+ 	if (opaque->btpo_prev != target)
+@@ -2532,7 +2562,7 @@ _bt_unlink_halfdead_page(Relation rel, Buffer leafbuf, BlockNumber scanblkno,
+ 		if (P_RIGHTMOST(opaque))
+ 		{
+ 			/* rightsib will be the only one left on the level */
+-			metabuf = _bt_getbuf(rel, BTREE_METAPAGE, BT_WRITE);
++			metabuf = _bt_getbuf(rel, BTREE_METAPAGE, BT_WRITE, InvalidBuffer);
+ 			metapg = BufferGetPage(metabuf);
+ 			metad = BTPageGetMeta(metapg);
+ 
+diff --git a/src/backend/access/nbtree/nbtsearch.c b/src/backend/access/nbtree/nbtsearch.c
+index c74543bfde..50f0adabc9 100644
+--- a/src/backend/access/nbtree/nbtsearch.c
++++ b/src/backend/access/nbtree/nbtsearch.c
+@@ -94,13 +94,22 @@ _bt_drop_lock_and_maybe_pin(IndexScanDesc scan, BTScanPos sp)
+  */
+ BTStack
+ _bt_search(Relation rel, BTScanInsert key, Buffer *bufP, int access,
+-		   Snapshot snapshot)
++		   Snapshot snapshot,
++           PgStreamingRead *pgsr)
+ {
+ 	BTStack		stack_in = NULL;
+ 	int			page_access = BT_READ;
++    Buffer pgsr_buf = InvalidBuffer;
+ 
+ 	/* Get the root page to start with */
+-	*bufP = _bt_getroot(rel, access);
++    if (pgsr)
++    {
++        pgsr_buf = pg_streaming_read_get_next(pgsr);
++    }
++	*bufP = _bt_getroot(rel, access, pgsr_buf);
++
++    if (BufferIsValid(pgsr_buf) && *bufP != pgsr_buf)
++        pg_streaming_read_increment_discarded(pgsr);
+ 
+ 	/* If index is empty and access = BT_READ, no root page is created. */
+ 	if (!BufferIsValid(*bufP))
+@@ -117,6 +126,8 @@ _bt_search(Relation rel, BTScanInsert key, Buffer *bufP, int access,
+ 		BlockNumber child;
+ 		BTStack		new_stack;
+ 
++        pgsr_buf = InvalidBuffer;
++
+ 		/*
+ 		 * Race -- the page we just grabbed may have split since we read its
+ 		 * downlink in its parent page (or the metapage).  If it has, we may
+@@ -168,7 +179,14 @@ _bt_search(Relation rel, BTScanInsert key, Buffer *bufP, int access,
+ 			page_access = BT_WRITE;
+ 
+ 		/* drop the read lock on the page, then acquire one on its child */
+-		*bufP = _bt_relandgetbuf(rel, *bufP, child, page_access);
++        if (pgsr)
++        {
++            pgsr_buf = pg_streaming_read_get_next(pgsr);
++        }
++		*bufP = _bt_relandgetbuf(rel, *bufP, child, page_access, pgsr_buf);
++
++        if (BufferIsValid(pgsr_buf) && *bufP != pgsr_buf)
++            pg_streaming_read_increment_discarded(pgsr);
+ 
+ 		/* okay, all set to move down a level */
+ 		stack_in = new_stack;
+@@ -293,14 +311,14 @@ _bt_moveright(Relation rel,
+ 				_bt_relbuf(rel, buf);
+ 
+ 			/* re-acquire the lock in the right mode, and re-check */
+-			buf = _bt_getbuf(rel, blkno, access);
++			buf = _bt_getbuf(rel, blkno, access, InvalidBuffer);
+ 			continue;
+ 		}
+ 
+ 		if (P_IGNORE(opaque) || _bt_compare(rel, key, page, P_HIKEY) >= cmpval)
+ 		{
+ 			/* step right one page */
+-			buf = _bt_relandgetbuf(rel, buf, opaque->btpo_next, access);
++			buf = _bt_relandgetbuf(rel, buf, opaque->btpo_next, access, InvalidBuffer);
+ 			continue;
+ 		}
+ 		else
+@@ -1363,7 +1381,7 @@ _bt_first(IndexScanDesc scan, ScanDirection dir)
+ 	 * Use the manufactured insertion scan key to descend the tree and
+ 	 * position ourselves on the target leaf page.
+ 	 */
+-	stack = _bt_search(rel, &inskey, &buf, BT_READ, scan->xs_snapshot);
++	stack = _bt_search(rel, &inskey, &buf, BT_READ, scan->xs_snapshot, scan->pgsr);
+ 
+ 	/* don't need to keep the stack around... */
+ 	_bt_freestack(stack);
+@@ -1984,6 +2002,7 @@ _bt_readnextpage(IndexScanDesc scan, BlockNumber blkno, ScanDirection dir)
+ 	Page		page;
+ 	BTPageOpaque opaque;
+ 	bool		status;
++    Buffer pgsr_buf = InvalidBuffer;
+ 
+ 	rel = scan->indexRelation;
+ 
+@@ -2003,8 +2022,18 @@ _bt_readnextpage(IndexScanDesc scan, BlockNumber blkno, ScanDirection dir)
+ 			}
+ 			/* check for interrupts while we're not holding any buffer lock */
+ 			CHECK_FOR_INTERRUPTS();
++
++            if (scan->pgsr)
++            {
++                pgsr_buf = pg_streaming_read_get_next(scan->pgsr);
++            }
++
+ 			/* step right one page */
+-			so->currPos.buf = _bt_getbuf(rel, blkno, BT_READ);
++			so->currPos.buf = _bt_getbuf(rel, blkno, BT_READ, pgsr_buf);
++
++            if (BufferIsValid(pgsr_buf) && so->currPos.buf != pgsr_buf)
++                pg_streaming_read_increment_discarded(scan->pgsr);
++
+ 			page = BufferGetPage(so->currPos.buf);
+ 			TestForOldSnapshot(scan->xs_snapshot, rel, page);
+ 			opaque = BTPageGetOpaque(page);
+@@ -2078,7 +2107,7 @@ _bt_readnextpage(IndexScanDesc scan, BlockNumber blkno, ScanDirection dir)
+ 		if (BTScanPosIsPinned(so->currPos))
+ 			_bt_lockbuf(rel, so->currPos.buf, BT_READ);
+ 		else
+-			so->currPos.buf = _bt_getbuf(rel, so->currPos.currPage, BT_READ);
++			so->currPos.buf = _bt_getbuf(rel, so->currPos.currPage, BT_READ, InvalidBuffer);
+ 
+ 		for (;;)
+ 		{
+@@ -2140,7 +2169,7 @@ _bt_readnextpage(IndexScanDesc scan, BlockNumber blkno, ScanDirection dir)
+ 					BTScanPosInvalidate(so->currPos);
+ 					return false;
+ 				}
+-				so->currPos.buf = _bt_getbuf(rel, blkno, BT_READ);
++				so->currPos.buf = _bt_getbuf(rel, blkno, BT_READ, InvalidBuffer);
+ 			}
+ 		}
+ 	}
+@@ -2213,7 +2242,7 @@ _bt_walk_left(Relation rel, Buffer buf, Snapshot snapshot)
+ 		_bt_relbuf(rel, buf);
+ 		/* check for interrupts while we're not holding any buffer lock */
+ 		CHECK_FOR_INTERRUPTS();
+-		buf = _bt_getbuf(rel, blkno, BT_READ);
++		buf = _bt_getbuf(rel, blkno, BT_READ, InvalidBuffer);
+ 		page = BufferGetPage(buf);
+ 		TestForOldSnapshot(snapshot, rel, page);
+ 		opaque = BTPageGetOpaque(page);
+@@ -2240,14 +2269,14 @@ _bt_walk_left(Relation rel, Buffer buf, Snapshot snapshot)
+ 			if (P_RIGHTMOST(opaque) || ++tries > 4)
+ 				break;
+ 			blkno = opaque->btpo_next;
+-			buf = _bt_relandgetbuf(rel, buf, blkno, BT_READ);
++			buf = _bt_relandgetbuf(rel, buf, blkno, BT_READ, InvalidBuffer);
+ 			page = BufferGetPage(buf);
+ 			TestForOldSnapshot(snapshot, rel, page);
+ 			opaque = BTPageGetOpaque(page);
+ 		}
+ 
+ 		/* Return to the original page to see what's up */
+-		buf = _bt_relandgetbuf(rel, buf, obknum, BT_READ);
++		buf = _bt_relandgetbuf(rel, buf, obknum, BT_READ, InvalidBuffer);
+ 		page = BufferGetPage(buf);
+ 		TestForOldSnapshot(snapshot, rel, page);
+ 		opaque = BTPageGetOpaque(page);
+@@ -2265,7 +2294,7 @@ _bt_walk_left(Relation rel, Buffer buf, Snapshot snapshot)
+ 					elog(ERROR, "fell off the end of index \"%s\"",
+ 						 RelationGetRelationName(rel));
+ 				blkno = opaque->btpo_next;
+-				buf = _bt_relandgetbuf(rel, buf, blkno, BT_READ);
++				buf = _bt_relandgetbuf(rel, buf, blkno, BT_READ, InvalidBuffer);
+ 				page = BufferGetPage(buf);
+ 				TestForOldSnapshot(snapshot, rel, page);
+ 				opaque = BTPageGetOpaque(page);
+@@ -2305,7 +2334,8 @@ _bt_walk_left(Relation rel, Buffer buf, Snapshot snapshot)
+  */
+ Buffer
+ _bt_get_endpoint(Relation rel, uint32 level, bool rightmost,
+-				 Snapshot snapshot)
++				 Snapshot snapshot,
++                 PgStreamingRead *pgsr)
+ {
+ 	Buffer		buf;
+ 	Page		page;
+@@ -2313,6 +2343,7 @@ _bt_get_endpoint(Relation rel, uint32 level, bool rightmost,
+ 	OffsetNumber offnum;
+ 	BlockNumber blkno;
+ 	IndexTuple	itup;
++    Buffer pgsr_buf = InvalidBuffer;
+ 
+ 	/*
+ 	 * If we are looking for a leaf page, okay to descend from fast root;
+@@ -2320,7 +2351,14 @@ _bt_get_endpoint(Relation rel, uint32 level, bool rightmost,
+ 	 * smarter about intermediate levels.)
+ 	 */
+ 	if (level == 0)
+-		buf = _bt_getroot(rel, BT_READ);
++    {
++        if (pgsr)
++            pgsr_buf = pg_streaming_read_get_next(pgsr);
++		buf = _bt_getroot(rel, BT_READ, pgsr_buf);
++
++        if (BufferIsValid(pgsr_buf) && buf != pgsr_buf)
++            pg_streaming_read_increment_discarded(pgsr);
++    }
+ 	else
+ 		buf = _bt_gettrueroot(rel);
+ 
+@@ -2333,6 +2371,7 @@ _bt_get_endpoint(Relation rel, uint32 level, bool rightmost,
+ 
+ 	for (;;)
+ 	{
++        pgsr_buf = InvalidBuffer;
+ 		/*
+ 		 * If we landed on a deleted page, step right to find a live page
+ 		 * (there must be one).  Also, if we want the rightmost page, step
+@@ -2346,7 +2385,7 @@ _bt_get_endpoint(Relation rel, uint32 level, bool rightmost,
+ 			if (blkno == P_NONE)
+ 				elog(ERROR, "fell off the end of index \"%s\"",
+ 					 RelationGetRelationName(rel));
+-			buf = _bt_relandgetbuf(rel, buf, blkno, BT_READ);
++			buf = _bt_relandgetbuf(rel, buf, blkno, BT_READ, InvalidBuffer);
+ 			page = BufferGetPage(buf);
+ 			TestForOldSnapshot(snapshot, rel, page);
+ 			opaque = BTPageGetOpaque(page);
+@@ -2370,7 +2409,16 @@ _bt_get_endpoint(Relation rel, uint32 level, bool rightmost,
+ 		itup = (IndexTuple) PageGetItem(page, PageGetItemId(page, offnum));
+ 		blkno = BTreeTupleGetDownLink(itup);
+ 
+-		buf = _bt_relandgetbuf(rel, buf, blkno, BT_READ);
++        if (pgsr)
++        {
++            pgsr_buf = pg_streaming_read_get_next(pgsr);
++        }
++
++		buf = _bt_relandgetbuf(rel, buf, blkno, BT_READ, pgsr_buf);
++
++        if (BufferIsValid(pgsr_buf) && buf != pgsr_buf)
++            pg_streaming_read_increment_discarded(pgsr);
++
+ 		page = BufferGetPage(buf);
+ 		opaque = BTPageGetOpaque(page);
+ 	}
+@@ -2403,7 +2451,7 @@ _bt_endpoint(IndexScanDesc scan, ScanDirection dir)
+ 	 * version of _bt_search().  We don't maintain a stack since we know we
+ 	 * won't need it.
+ 	 */
+-	buf = _bt_get_endpoint(rel, 0, ScanDirectionIsBackward(dir), scan->xs_snapshot);
++	buf = _bt_get_endpoint(rel, 0, ScanDirectionIsBackward(dir), scan->xs_snapshot, scan->pgsr);
+ 
+ 	if (!BufferIsValid(buf))
+ 	{
+diff --git a/src/backend/access/nbtree/nbtutils.c b/src/backend/access/nbtree/nbtutils.c
+index ff260c393a..63e29ce01c 100644
+--- a/src/backend/access/nbtree/nbtutils.c
++++ b/src/backend/access/nbtree/nbtutils.c
+@@ -1761,7 +1761,7 @@ _bt_killitems(IndexScanDesc scan)
+ 
+ 		droppedpin = true;
+ 		/* Attempt to re-read the buffer, getting pin and lock. */
+-		buf = _bt_getbuf(scan->indexRelation, so->currPos.currPage, BT_READ);
++		buf = _bt_getbuf(scan->indexRelation, so->currPos.currPage, BT_READ, InvalidBuffer);
+ 
+ 		page = BufferGetPage(buf);
+ 		if (BufferGetLSNAtomic(buf) == so->currPos.lsn)
+diff --git a/src/backend/access/table/tableam.c b/src/backend/access/table/tableam.c
+index 094b24c7c9..67f2ca8045 100644
+--- a/src/backend/access/table/tableam.c
++++ b/src/backend/access/table/tableam.c
+@@ -117,7 +117,7 @@ table_beginscan_catalog(Relation relation, int nkeys, struct ScanKeyData *key)
+ 	Snapshot	snapshot = RegisterSnapshot(GetCatalogSnapshot(relid));
+ 
+ 	return relation->rd_tableam->scan_begin(relation, snapshot, nkeys, key,
+-											NULL, flags);
++											NULL, flags, NULL);
+ }
+ 
+ void
+@@ -194,7 +194,7 @@ table_beginscan_parallel(Relation relation, ParallelTableScanDesc pscan)
+ 	}
+ 
+ 	return relation->rd_tableam->scan_begin(relation, snapshot, 0, NULL,
+-											pscan, flags);
++											pscan, flags, NULL);
+ }
+ 
+ 
+@@ -228,7 +228,7 @@ table_index_fetch_tuple_check(Relation rel,
+ 	slot = table_slot_create(rel, NULL);
+ 	scan = table_index_fetch_begin(rel);
+ 	found = table_index_fetch_tuple(scan, tid, snapshot, slot, &call_again,
+-									all_dead);
++									all_dead, NULL);
+ 	table_index_fetch_end(scan);
+ 	ExecDropSingleTupleTableSlot(slot);
+ 
+diff --git a/src/backend/commands/constraint.c b/src/backend/commands/constraint.c
+index 721de178ca..5202ee3987 100644
+--- a/src/backend/commands/constraint.c
++++ b/src/backend/commands/constraint.c
+@@ -112,7 +112,7 @@ unique_key_recheck(PG_FUNCTION_ARGS)
+ 		bool		call_again = false;
+ 
+ 		if (!table_index_fetch_tuple(scan, &tmptid, SnapshotSelf, slot,
+-									 &call_again, NULL))
++									 &call_again, NULL, NULL))
+ 		{
+ 			/*
+ 			 * All rows referenced by the index entry are dead, so skip the
+diff --git a/src/backend/commands/copyto.c b/src/backend/commands/copyto.c
+index f26cc0d162..900afb6a1d 100644
+--- a/src/backend/commands/copyto.c
++++ b/src/backend/commands/copyto.c
+@@ -855,7 +855,7 @@ DoCopyTo(CopyToState cstate)
+ 		TupleTableSlot *slot;
+ 		TableScanDesc scandesc;
+ 
+-		scandesc = table_beginscan(cstate->rel, GetActiveSnapshot(), 0, NULL);
++		scandesc = table_beginscan(cstate->rel, GetActiveSnapshot(), 0, NULL, NULL);
+ 		slot = table_slot_create(cstate->rel, NULL);
+ 
+ 		processed = 0;
+diff --git a/src/backend/commands/tablecmds.c b/src/backend/commands/tablecmds.c
+index bc90185da6..dece772248 100644
+--- a/src/backend/commands/tablecmds.c
++++ b/src/backend/commands/tablecmds.c
+@@ -5884,7 +5884,7 @@ ATRewriteTable(AlteredTableInfo *tab, Oid OIDNewHeap, LOCKMODE lockmode)
+ 		 * checking all the constraints.
+ 		 */
+ 		snapshot = RegisterSnapshot(GetLatestSnapshot());
+-		scan = table_beginscan(oldrel, snapshot, 0, NULL);
++		scan = table_beginscan(oldrel, snapshot, 0, NULL, NULL);
+ 
+ 		/*
+ 		 * Switch to per-tuple memory context and reset it for each tuple
+@@ -11555,7 +11555,7 @@ validateForeignKeyConstraint(char *conname,
+ 	 */
+ 	snapshot = RegisterSnapshot(GetLatestSnapshot());
+ 	slot = table_slot_create(rel, NULL);
+-	scan = table_beginscan(rel, snapshot, 0, NULL);
++	scan = table_beginscan(rel, snapshot, 0, NULL, NULL);
+ 
+ 	perTupCxt = AllocSetContextCreate(CurrentMemoryContext,
+ 									  "validateForeignKeyConstraint",
+diff --git a/src/backend/commands/typecmds.c b/src/backend/commands/typecmds.c
+index b7c3dded17..c1b8e0f0ef 100644
+--- a/src/backend/commands/typecmds.c
++++ b/src/backend/commands/typecmds.c
+@@ -2745,7 +2745,7 @@ AlterDomainNotNull(List *names, bool notNull)
+ 
+ 			/* Scan all tuples in this relation */
+ 			snapshot = RegisterSnapshot(GetLatestSnapshot());
+-			scan = table_beginscan(testrel, snapshot, 0, NULL);
++			scan = table_beginscan(testrel, snapshot, 0, NULL, NULL);
+ 			slot = table_slot_create(testrel, NULL);
+ 			while (table_scan_getnextslot(scan, ForwardScanDirection, slot))
+ 			{
+@@ -3161,7 +3161,7 @@ validateDomainConstraint(Oid domainoid, char *ccbin)
+ 
+ 		/* Scan all tuples in this relation */
+ 		snapshot = RegisterSnapshot(GetLatestSnapshot());
+-		scan = table_beginscan(testrel, snapshot, 0, NULL);
++		scan = table_beginscan(testrel, snapshot, 0, NULL, NULL);
+ 		slot = table_slot_create(testrel, NULL);
+ 		while (table_scan_getnextslot(scan, ForwardScanDirection, slot))
+ 		{
+diff --git a/src/backend/executor/execIndexing.c b/src/backend/executor/execIndexing.c
+index 1f1181b560..6108a04f68 100644
+--- a/src/backend/executor/execIndexing.c
++++ b/src/backend/executor/execIndexing.c
+@@ -752,7 +752,7 @@ check_exclusion_or_unique_constraint(Relation heap, Relation index,
+ retry:
+ 	conflict = false;
+ 	found_self = false;
+-	index_scan = index_beginscan(heap, index, &DirtySnapshot, indnkeyatts, 0);
++	index_scan = index_beginscan(heap, index, &DirtySnapshot, indnkeyatts, 0, NULL);
+ 	index_rescan(index_scan, scankeys, indnkeyatts, NULL, 0);
+ 
+ 	while (index_getnext_slot(index_scan, ForwardScanDirection, existing_slot))
+diff --git a/src/backend/executor/execMain.c b/src/backend/executor/execMain.c
+index d78862e660..d39a09f4dd 100644
+--- a/src/backend/executor/execMain.c
++++ b/src/backend/executor/execMain.c
+@@ -55,6 +55,7 @@
+ #include "mb/pg_wchar.h"
+ #include "miscadmin.h"
+ #include "parser/parsetree.h"
++#include "storage/aio.h"
+ #include "storage/bufmgr.h"
+ #include "storage/lmgr.h"
+ #include "tcop/utility.h"
+@@ -66,6 +67,7 @@
+ #include "utils/rls.h"
+ #include "utils/ruleutils.h"
+ #include "utils/snapmgr.h"
++#include <time.h>
+ 
+ 
+ /* Hooks for plugins to get control in ExecutorStart/Run/Finish/End */
+@@ -102,6 +104,34 @@ static char *ExecBuildSlotValueDescription(Oid reloid,
+ 										   int maxfieldlen);
+ static void EvalPlanQualStart(EPQState *epqstate, Plan *planTree);
+ 
++typedef struct AioBlockInfo
++{
++    unsigned int relNumber;
++    unsigned int blockNum;
++} AioBlockInfo;
++
++typedef struct ExecScanDescData
++{
++    Relation reln;
++    BlockNumber bnum;
++    
++    AioBlockInfo nextSeq[1000];
++    char queryFile[70];
++    char prefetchFile[70];
++    long int currFileOffset;
++    int currArrayOffset;
++    struct PgStreamingRead *pgsr;
++    bool weAreDone;
++    long int prefetched;
++    clock_t wait_time;
++    Buffer allBuf[100000];
++    int allBufCt;
++    int relBufCt;
++    int iodepth;
++    uint32 completed_count;
++} ExecScanDescData;
++typedef struct ExecScanDescData *ExecScanDesc;
++
+ /* end of local decls */
+ 
+ 
+@@ -1575,6 +1605,222 @@ ExecCloseRangeTableRelations(EState *estate)
+ 	}
+ }
+ 
++/*
++** ADDITION CODE FOR AIO
++*/
++
++static void
++exec_pgsr_release(uintptr_t pgsr_private, uintptr_t read_private)
++{
++    ExecScanDesc scan = (ExecScanDesc) pgsr_private;
++    Buffer buf = (Buffer) read_private;
++
++    Assert(BufferIsValid(buf));
++
++    for  (int i=scan->relBufCt+1;i<scan->allBufCt; i++)
++    {
++        if (BufferIsValid(scan->allBuf[i])) // && BufferIsPinned(scan->allBuf[i]))
++            ReleaseBuffer(scan->allBuf[i]);
++    }
++
++    if (BufferIsValid(buf))
++        ReleaseBuffer(buf);
++}
++
++void
++extractPageTag(char *readbuf, int *rNum, int *bNum)
++{
++    char *ptr = strchr(readbuf, '_');
++    int idx = ptr - readbuf;
++    int len = strlen(readbuf);
++    char relNum[10], blockNum[10];
++
++    memcpy(relNum, readbuf, idx);
++    relNum[idx] = '\0';
++    memcpy(blockNum, ptr+1, len - idx - 2);
++    blockNum[len-idx-2] = '\0';
++
++    *rNum = atoi(relNum);
++    *bNum = atoi(blockNum);
++
++    return;
++}
++
++void
++write_query_to_file(ExecScanDesc scan, char* queryString)
++{
++    FILE *fd;
++    fd = fopen(scan->queryFile, "w");
++
++    fprintf(fd, "%s", queryString);
++    fprintf(fd, "\n\n\n");
++
++    fclose(fd);
++}
++
++static PgStreamingReadNextStatus
++exec_pgsr_next(uintptr_t pgsr_private, PgAioInProgress *aio, uintptr_t *read_private)
++{
++    //return PGSR_NEXT_END;
++    ExecScanDesc scan = (ExecScanDesc) pgsr_private;
++    Buffer buf;
++    bool already_valid = false;
++    BlockNumber blockno;
++    char readbuf[20];
++    int relNum, blockNum;
++    char *res;
++    const int doneRelNum = 99999999;
++    clock_t start,end;
++
++    start = clock();
++
++    if (scan->weAreDone)
++    {
++        end = clock();
++        scan->wait_time += (end - start);
++        return PGSR_NEXT_END;
++    }
++
++    if (scan->currArrayOffset == 1000)
++    {
++        FILE *fd;
++        fd = fopen(scan->prefetchFile, "r");
++
++        if (fd == NULL)
++        {
++            scan->weAreDone = true;
++            end = clock();
++            scan->wait_time += (end - start);
++            return PGSR_NEXT_END;
++        }
++
++        fseek(fd, scan->currFileOffset, SEEK_SET);
++
++        res = fgets(readbuf, 20, (FILE*)fd);
++        if (res == NULL)
++        {
++            scan->weAreDone = true;
++            end = clock();
++            scan->wait_time += (end - start);
++            return PGSR_NEXT_END;
++        }
++        extractPageTag(readbuf, &relNum, &blockNum);
++
++        scan->reln->rd_locator.relNumber = relNum;
++        blockno = blockNum;
++
++        for (int i=0; i<1000; i++)
++        {
++            res = fgets(readbuf, 20, (FILE*)fd);
++
++            if (res == NULL)
++            {
++                scan->nextSeq[i].relNumber = doneRelNum;
++                break;
++            }
++            else
++            {
++                extractPageTag(readbuf, &relNum, &blockNum);
++            
++                scan->nextSeq[i].relNumber = relNum;
++                scan->nextSeq[i].blockNum = blockNum;
++            }
++        }
++
++        scan->currFileOffset = ftell(fd);
++        fclose(fd);
++        scan->currArrayOffset = 0;
++    }
++    else
++    {
++        if (scan->nextSeq[scan->currArrayOffset].relNumber == doneRelNum)
++        {
++            scan->weAreDone = true;
++            end = clock();
++            scan->wait_time += (end - start);
++            return PGSR_NEXT_END;
++        }
++        scan->reln->rd_locator.relNumber = scan->nextSeq[scan->currArrayOffset].relNumber;
++        blockno = scan->nextSeq[scan->currArrayOffset].blockNum;
++        scan->currArrayOffset++;
++    }
++
++    scan->reln->rd_locator.spcOid = 1663;
++    scan->reln->rd_locator.dbOid = 182039; //33203; //16384; //33203;
++    scan->reln->rd_smgr = NULL;
++
++    /*
++    if (scan->bnum == InvalidBlockNumber)
++    {
++        scan->reln->rd_locator.relNumber = 16553;
++        scan->bnum = blockno = 3;
++    }
++    else
++    {
++        blockno = ++scan->bnum;
++        scan->reln->rd_locator.relNumber = 16552;
++        if (blockno >= 720046)
++        {
++            scan->bnum = blockno = 0;
++            *read_private = 0;
++            return PGSR_NEXT_END;
++        }
++    }
++    */
++
++    buf = ReadBufferAsync(scan->reln, MAIN_FORKNUM, blockno,
++                          RBM_NORMAL, NULL, &already_valid,
++                          &aio);
++
++    scan->allBuf[scan->allBufCt++] = buf;
++    *read_private = (uintptr_t) buf;
++    scan->prefetched++;
++
++    int i;
++    pg_streaming_read_get_completed_count(scan->pgsr, &scan->completed_count);
++    int lim = (int)(scan->allBufCt-(2*scan->iodepth)-(int)(scan->completed_count)-1);
++
++    for (i=scan->relBufCt+1; i<lim; i++)
++    {
++        if (BufferIsValid(scan->allBuf[i]))
++            ReleaseBuffer(scan->allBuf[i]);
++    }
++    scan->relBufCt = i-1;
++
++    end = clock();
++    scan->wait_time += (end - start);
++
++    if (already_valid)
++    {
++        /*ereport(NOTICE,
++                errmsg("NO IO Done"));*/
++        return PGSR_NEXT_NO_IO;
++    }        
++    else
++        return PGSR_NEXT_IO;
++}
++
++static PgStreamingRead *
++exec_pgsr_alloc(ExecScanDesc scan)
++{
++    int iodepth = 1024; //1024; //1024; //8192; //16384; //100000;
++    scan->iodepth = iodepth;
++
++    ereport(NOTICE,
++        errcode(ERRCODE_NO_DATA),
++        errmsg("buffersize: %d, iodepth: %d", NBuffers, iodepth));
++
++    //TODO: add code to start model inference
++
++    return pg_streaming_read_alloc(iodepth, (uintptr_t) scan,
++                                   exec_pgsr_next,
++                                   exec_pgsr_release);
++}    
++
++/*
++** END
++*/
++
+ /* ----------------------------------------------------------------
+  *		ExecutePlan
+  *
+@@ -1600,6 +1846,75 @@ ExecutePlan(EState *estate,
+ {
+ 	TupleTableSlot *slot;
+ 	uint64		current_tuple_count;
++    bool includeNewCode = false;
++    MemoryContext oldcxt;
++
++    /*
++    ** ADDITION CODE FOR AIO
++    */
++    ereport(NOTICE,
++        errcode(ERRCODE_NO_DATA),
++        errmsg("Starting Execution"));
++
++    ExecScanDesc scan;
++    scan = (ExecScanDesc) palloc(sizeof(ExecScanDescData));
++    
++    if (includeNewCode)
++    {
++        oldcxt = MemoryContextSwitchTo(CacheMemoryContext);
++        scan->reln = (Relation) palloc(sizeof(RelationData));
++        scan->reln->pgstat_info = NULL;
++        scan->reln->pgstat_enabled = false;
++        scan->reln->rd_backend = -1;
++        scan->reln->rd_rel = (Form_pg_class) palloc(sizeof(FormData_pg_class));
++        scan->reln->rd_rel->relpersistence = 'p';
++        MemoryContextSwitchTo(oldcxt);
++
++        scan->prefetched = 0;
++        scan->allBufCt = 0;
++        scan->relBufCt = -1;
++        scan->completed_count = 0;
++        scan->wait_time = 0;
++        scan->currFileOffset = 0;
++        scan->currArrayOffset = 1000;
++        char strBID[3];
++        sprintf(strBID, "%d", MyBackendId);
++        char tmp_q[70] = "/home/akshay/seqFiles/prefetchFiles/\0";
++        strcat(tmp_q, strBID);
++        strcat(tmp_q, "-query.txt");
++        memcpy(scan->queryFile, tmp_q, 70);
++        char tmp_p[70] = "/home/akshay/seqFiles/prefetchFiles/\0";
++        strcat(tmp_p, strBID);
++        strcat(tmp_p, "-prefetch.txt");
++        memcpy(scan->prefetchFile, tmp_p, 70);
++        scan->weAreDone = false;
++
++        write_query_to_file(scan, estate->es_sourceText);
++        char pyScriptCMD[100] = "python /home/akshay/seqFiles/prefetchFiles/createPrefetchFile.py \0";
++        strcat(pyScriptCMD, strBID);
++        system(pyScriptCMD);
++
++        Buffer pgsr_buf = InvalidBuffer;
++
++        scan->bnum = InvalidBlockNumber;
++        scan->pgsr = NULL;
++        if (operation == CMD_SELECT && estate->es_relations[0]) // && estate->es_relations[0]->rd_locator.relNumber == 16541)
++        {
++            //scan->reln = estate->es_relations[0]; 
++            scan->pgsr = exec_pgsr_alloc(scan);
++            //pgsr_buf = pg_streaming_read_get_next(scan->pgsr);
++        }
++    }
++    else
++    {
++        scan->pgsr = NULL;
++    }
++
++    estate->pgsr = scan->pgsr;
++
++    /*
++    ** END
++    */
+ 
+ 	/*
+ 	 * initialize local variables
+@@ -1630,10 +1945,26 @@ ExecutePlan(EState *estate,
+ 		/* Reset the per-output-tuple exprcontext */
+ 		ResetPerTupleExprContext(estate);
+ 
++        /*
++        ** ADDITIONAL CODE FOR AIO
++        */
++        /*
++        if (includeNewCode)
++        {
++            if (scan->pgsr)
++            {
++                pgsr_buf = pg_streaming_read_get_next(scan->pgsr);
++            }
++        }
++        */
++        /*
++        ** END
++        */
++
+ 		/*
+ 		 * Execute the plan and obtain a tuple
+ 		 */
+-		slot = ExecProcNode(planstate);
++        slot = ExecProcNode(planstate);
+ 
+ 		/*
+ 		 * if the tuple is null, then we assume there is nothing more to
+@@ -1693,6 +2024,30 @@ ExecutePlan(EState *estate,
+ 	if (!(estate->es_top_eflags & EXEC_FLAG_BACKWARD))
+ 		ExecShutdownNode(planstate);
+ 
++    if (includeNewCode)
++    {
++        ereport(NOTICE,
++            errcode(ERRCODE_NO_DATA),
++            errmsg("Prefetched count: %d", scan->prefetched));
++
++        pg_streaming_read_print_discarded(scan->pgsr);
++
++        ereport(NOTICE,
++            errcode(ERRCODE_NO_DATA),
++            errmsg("Extra time to initiate prefetch: %lf", ((double)scan->wait_time)/CLOCKS_PER_SEC));
++
++        if (scan->pgsr)
++        {
++            pg_streaming_read_free(scan->pgsr);
++            scan->pgsr = NULL;
++        }
++
++        pfree(scan->reln->rd_rel);
++        pfree(scan->reln);
++    }
++
++    pfree(scan);
++
+ 	if (use_parallel_mode)
+ 		ExitParallelMode();
+ }
+diff --git a/src/backend/executor/execReplication.c b/src/backend/executor/execReplication.c
+index 6014f2e248..36f1f03506 100644
+--- a/src/backend/executor/execReplication.c
++++ b/src/backend/executor/execReplication.c
+@@ -136,7 +136,7 @@ RelationFindReplTupleByIndex(Relation rel, Oid idxoid,
+ 	InitDirtySnapshot(snap);
+ 	scan = index_beginscan(rel, idxrel, &snap,
+ 						   IndexRelationGetNumberOfKeyAttributes(idxrel),
+-						   0);
++						   0, NULL);
+ 
+ 	/* Build scan key. */
+ 	build_replindex_scan_key(skey, rel, idxrel, searchslot);
+@@ -309,7 +309,7 @@ RelationFindReplTupleSeq(Relation rel, LockTupleMode lockmode,
+ 
+ 	/* Start a heap scan. */
+ 	InitDirtySnapshot(snap);
+-	scan = table_beginscan(rel, &snap, 0, NULL);
++	scan = table_beginscan(rel, &snap, 0, NULL, NULL);
+ 	scanslot = table_slot_create(rel, NULL);
+ 
+ retry:
+diff --git a/src/backend/executor/nodeBitmapHeapscan.c b/src/backend/executor/nodeBitmapHeapscan.c
+index ca714f5775..d0bbbf1d15 100644
+--- a/src/backend/executor/nodeBitmapHeapscan.c
++++ b/src/backend/executor/nodeBitmapHeapscan.c
+@@ -220,7 +220,7 @@ BitmapHeapNext(BitmapHeapScanState *node)
+ 						  !tbmres->recheck &&
+ 						  VM_ALL_VISIBLE(node->ss.ss_currentRelation,
+ 										 tbmres->blockno,
+-										 &node->vmbuffer));
++										 &node->vmbuffer, node->ss.ps.state->pgsr));
+ 
+ 			if (skip_fetch)
+ 			{
+@@ -233,7 +233,7 @@ BitmapHeapNext(BitmapHeapScanState *node)
+ 				 */
+ 				node->return_empty_tuples = tbmres->ntuples;
+ 			}
+-			else if (!table_scan_bitmap_next_block(scan, tbmres))
++			else if (!table_scan_bitmap_next_block(scan, tbmres, node->ss.ps.state->pgsr))
+ 			{
+ 				/* AM doesn't think this block is valid, skip */
+ 				continue;
+@@ -509,7 +509,7 @@ BitmapPrefetch(BitmapHeapScanState *node, TableScanDesc scan)
+ 							  (node->tbmres ? !node->tbmres->recheck : false) &&
+ 							  VM_ALL_VISIBLE(node->ss.ss_currentRelation,
+ 											 tbmpre->blockno,
+-											 &node->pvmbuffer));
++											 &node->pvmbuffer, NULL));
+ 
+ 				if (!skip_fetch)
+ 				{
+@@ -563,7 +563,7 @@ BitmapPrefetch(BitmapHeapScanState *node, TableScanDesc scan)
+ 							  (node->tbmres ? !node->tbmres->recheck : false) &&
+ 							  VM_ALL_VISIBLE(node->ss.ss_currentRelation,
+ 											 tbmpre->blockno,
+-											 &node->pvmbuffer));
++											 &node->pvmbuffer, NULL));
+ 
+ 				if (!skip_fetch)
+ 				{
+diff --git a/src/backend/executor/nodeBitmapIndexscan.c b/src/backend/executor/nodeBitmapIndexscan.c
+index 551e47630d..028c3e7fc3 100644
+--- a/src/backend/executor/nodeBitmapIndexscan.c
++++ b/src/backend/executor/nodeBitmapIndexscan.c
+@@ -62,6 +62,7 @@ MultiExecBitmapIndexScan(BitmapIndexScanState *node)
+ 	 * extract necessary information from index scan node
+ 	 */
+ 	scandesc = node->biss_ScanDesc;
++    scandesc->pgsr = node->ss.ps.state->pgsr;
+ 
+ 	/*
+ 	 * If we have runtime keys and they've not already been set up, do it now.
+diff --git a/src/backend/executor/nodeIndexonlyscan.c b/src/backend/executor/nodeIndexonlyscan.c
+index eb3ddd2943..648c031c1d 100644
+--- a/src/backend/executor/nodeIndexonlyscan.c
++++ b/src/backend/executor/nodeIndexonlyscan.c
+@@ -94,7 +94,8 @@ IndexOnlyNext(IndexOnlyScanState *node)
+ 								   node->ioss_RelationDesc,
+ 								   estate->es_snapshot,
+ 								   node->ioss_NumScanKeys,
+-								   node->ioss_NumOrderByKeys);
++								   node->ioss_NumOrderByKeys,
++                                   estate->pgsr);
+ 
+ 		node->ioss_ScanDesc = scandesc;
+ 
+@@ -160,7 +161,8 @@ IndexOnlyNext(IndexOnlyScanState *node)
+ 		 */
+ 		if (!VM_ALL_VISIBLE(scandesc->heapRelation,
+ 							ItemPointerGetBlockNumber(tid),
+-							&node->ioss_VMBuffer))
++							&node->ioss_VMBuffer,
++                            estate->pgsr))
+ 		{
+ 			/*
+ 			 * Rats, we have to visit the heap to check visibility.
+diff --git a/src/backend/executor/nodeIndexscan.c b/src/backend/executor/nodeIndexscan.c
+index 5ef5c6930f..8af315e5c0 100644
+--- a/src/backend/executor/nodeIndexscan.c
++++ b/src/backend/executor/nodeIndexscan.c
+@@ -113,7 +113,9 @@ IndexNext(IndexScanState *node)
+ 								   node->iss_RelationDesc,
+ 								   estate->es_snapshot,
+ 								   node->iss_NumScanKeys,
+-								   node->iss_NumOrderByKeys);
++								   node->iss_NumOrderByKeys,
++                                   estate->pgsr);
++                                   //NULL);
+ 
+ 		node->iss_ScanDesc = scandesc;
+ 
+@@ -208,7 +210,8 @@ IndexNextWithReorder(IndexScanState *node)
+ 								   node->iss_RelationDesc,
+ 								   estate->es_snapshot,
+ 								   node->iss_NumScanKeys,
+-								   node->iss_NumOrderByKeys);
++								   node->iss_NumOrderByKeys,
++                                   estate->pgsr);
+ 
+ 		node->iss_ScanDesc = scandesc;
+ 
+diff --git a/src/backend/executor/nodeSeqscan.c b/src/backend/executor/nodeSeqscan.c
+index 7b58cd9162..883879b821 100644
+--- a/src/backend/executor/nodeSeqscan.c
++++ b/src/backend/executor/nodeSeqscan.c
+@@ -70,7 +70,7 @@ SeqNext(SeqScanState *node)
+ 		 */
+ 		scandesc = table_beginscan(node->ss.ss_currentRelation,
+ 								   estate->es_snapshot,
+-								   0, NULL);
++								   0, NULL, estate->pgsr);
+ 		node->ss.ss_currentScanDesc = scandesc;
+ 	}
+ 
+diff --git a/src/backend/partitioning/partbounds.c b/src/backend/partitioning/partbounds.c
+index 0823fa7b1d..3d69425168 100644
+--- a/src/backend/partitioning/partbounds.c
++++ b/src/backend/partitioning/partbounds.c
+@@ -3387,7 +3387,7 @@ check_default_partition_contents(Relation parent, Relation default_rel,
+ 		econtext = GetPerTupleExprContext(estate);
+ 		snapshot = RegisterSnapshot(GetLatestSnapshot());
+ 		tupslot = table_slot_create(part_rel, &estate->es_tupleTable);
+-		scan = table_beginscan(part_rel, snapshot, 0, NULL);
++		scan = table_beginscan(part_rel, snapshot, 0, NULL, NULL);
+ 
+ 		/*
+ 		 * Switch to per-tuple memory context and reset it for each tuple
+diff --git a/src/backend/rewrite/rewriteDefine.c b/src/backend/rewrite/rewriteDefine.c
+index 09165b269b..a42b742358 100644
+--- a/src/backend/rewrite/rewriteDefine.c
++++ b/src/backend/rewrite/rewriteDefine.c
+@@ -444,7 +444,7 @@ DefineQueryRewrite(const char *rulename,
+ 								RelationGetRelationName(event_relation))));
+ 
+ 			snapshot = RegisterSnapshot(GetLatestSnapshot());
+-			scanDesc = table_beginscan(event_relation, snapshot, 0, NULL);
++			scanDesc = table_beginscan(event_relation, snapshot, 0, NULL, NULL);
+ 			slot = table_slot_create(event_relation, NULL);
+ 			if (table_scan_getnextslot(scanDesc, ForwardScanDirection, slot))
+ 				ereport(ERROR,
+diff --git a/src/backend/storage/aio/aio_util.c b/src/backend/storage/aio/aio_util.c
+index 35436dfcd3..fc2d0b285c 100644
+--- a/src/backend/storage/aio/aio_util.c
++++ b/src/backend/storage/aio/aio_util.c
+@@ -16,6 +16,7 @@
+ 
+ #include "storage/aio_internal.h"
+ #include "miscadmin.h"
++#include <time.h>
+ 
+ 
+ /* typedef is in header */
+@@ -372,6 +373,10 @@ struct PgStreamingRead
+ 	uint32 iodepth_max;
+ 	uint32 distance_max;
+ 	uint32 all_items_count;
++    long int discarded;
++    long int wait_count;
++    double wait_time;
++    double discard_time;
+ 
+ 	uintptr_t pgsr_private;
+ 	PgStreamingReadDetermineNextCB determine_next_cb;
+@@ -417,7 +422,7 @@ pg_streaming_read_alloc(uint32 iodepth, uintptr_t pgsr_private,
+ {
+ 	PgStreamingRead *pgsr;
+ 
+-	iodepth = Max(Min(iodepth, NBuffers / 128), 1);
++	//iodepth = Max(Min(iodepth, NBuffers / 128), 1);
+ 
+ 	pgsr = palloc0(offsetof(PgStreamingRead, all_items) +
+ 				   sizeof(PgStreamingReadItem) * iodepth * 2);
+@@ -425,6 +430,11 @@ pg_streaming_read_alloc(uint32 iodepth, uintptr_t pgsr_private,
+ 	pgsr->iodepth_max = iodepth;
+ 	pgsr->distance_max = iodepth;
+ 	pgsr->all_items_count = pgsr->iodepth_max + pgsr->distance_max;
++    pgsr->discarded = 0;
++    pgsr->no_io_count = 0;
++    pgsr->wait_count = 0;
++    pgsr->wait_time = 0.0;
++    pgsr->discard_time = 0.0;
+ 	pgsr->pgsr_private = pgsr_private;
+ 	pgsr->determine_next_cb = determine_next_cb;
+ 	pgsr->release_cb = release_cb;
+@@ -597,6 +607,7 @@ pg_streaming_read_prefetch(PgStreamingRead *pgsr)
+ 	 * - If most requests don't trigger IO, we should probably reduce the
+ 	 *   prefetch window.
+ 	 */
++    /*
+ 	if (pgsr->current_window < pgsr->iodepth_max)
+ 	{
+ 		if (pgsr->current_window == 0)
+@@ -613,6 +624,10 @@ pg_streaming_read_prefetch(PgStreamingRead *pgsr)
+ 	{
+ 		min_issue = Min(pgsr->iodepth_max, pgsr->current_window / 4);
+ 	}
++    */
++
++    pgsr->current_window = pgsr->iodepth_max;
++    min_issue = 1;
+ 
+ 	Assert(pgsr->inflight_count <= pgsr->current_window);
+ 	Assert(pgsr->completed_count <= (pgsr->iodepth_max + pgsr->distance_max));
+@@ -637,6 +652,12 @@ pg_streaming_read_prefetch(PgStreamingRead *pgsr)
+ uintptr_t
+ pg_streaming_read_get_next(PgStreamingRead *pgsr)
+ {
++    /*
++    ereport(NOTICE,
++        errcode(ERRCODE_NO_DATA),
++        errmsg("AIO get next"));
++    */
++
+ 	if (pgsr->prefetched_total_count == 0)
+ 	{
+ 		pg_streaming_read_prefetch(pgsr);
+@@ -652,6 +673,7 @@ pg_streaming_read_get_next(PgStreamingRead *pgsr)
+ 	{
+ 		PgStreamingReadItem *this_read;
+ 		uint64_t ret;
++        clock_t start, end;
+ 
+ 		Assert(pgsr->prefetched_total_count > 0);
+ 
+@@ -661,10 +683,14 @@ pg_streaming_read_get_next(PgStreamingRead *pgsr)
+ 
+ 		if (this_read->in_progress)
+ 		{
++            pgsr->wait_count++;
++            start = clock();
+ 			pgaio_io_wait(this_read->aio);
+ 			/* callback should have updated */
+ 			Assert(!this_read->in_progress);
+ 			Assert(this_read->valid);
++            end = clock();
++            pgsr->wait_time += (((double) (end - start)) / CLOCKS_PER_SEC);
+ 		}
+ 
+ 		Assert(this_read->read_private != 0);
+@@ -676,6 +702,52 @@ pg_streaming_read_get_next(PgStreamingRead *pgsr)
+ 		dlist_push_tail(&pgsr->available, &this_read->node);
+ 		pg_streaming_read_prefetch(pgsr);
+ 
++        PrintBufferInfo(ret);
++
+ 		return ret;
+ 	}
+ }
++
++void
++pg_streaming_read_increment_discarded(PgStreamingRead *pgsr)
++{
++    if (pgsr)
++        pgsr->discarded++;
++    return;
++}
++
++void
++pg_streaming_discard_time_add(PgStreamingRead *pgsr, clock_t start, clock_t end)
++{
++    pgsr->discard_time += (((double) (end - start)) / CLOCKS_PER_SEC);
++}
++
++void
++pg_streaming_read_print_discarded(PgStreamingRead *pgsr)
++{
++    ereport(NOTICE,
++        errcode(ERRCODE_NO_DATA),
++        errmsg("Discarded count: %d", pgsr->discarded));
++
++    ereport(NOTICE,
++        errcode(ERRCODE_NO_DATA),
++        errmsg("No IO Count: %d", pgsr->no_io_count));
++
++    ereport(NOTICE,
++        errcode(ERRCODE_NO_DATA),
++        errmsg("Wait Count: %d", pgsr->wait_count));
++
++    ereport(NOTICE,
++        errcode(ERRCODE_NO_DATA),
++        errmsg("Wait Time: %lf", pgsr->wait_time));
++
++    ereport(NOTICE,
++        errcode(ERRCODE_NO_DATA),
++        errmsg("Discard Time: %lf", pgsr->discard_time));
++}
++
++void
++pg_streaming_read_get_completed_count(PgStreamingRead *pgsr, uint32 *cc)
++{
++    cc = pgsr->completed_count;
++}
+diff --git a/src/backend/storage/buffer/bufmgr.c b/src/backend/storage/buffer/bufmgr.c
+index 3b63e37e5e..d452d89dda 100644
+--- a/src/backend/storage/buffer/bufmgr.c
++++ b/src/backend/storage/buffer/bufmgr.c
+@@ -786,6 +786,20 @@ ReadBufferExtended(Relation reln, ForkNumber forkNum, BlockNumber blockNum,
+ 	bool		hit;
+ 	Buffer		buf;
+ 
++    /*
++    if (reln->rd_locator.dbOid == 33203)
++    {
++        if (reln->rd_locator.relNumber > 33000)
++        {
++            ereport(NOTICE,
++                errcode(ERRCODE_NO_DATA),
++                errmsg("%d_%d",
++                    reln->rd_locator.relNumber,
++                    blockNum));
++        }
++    }
++    */
++
+ 	/*
+ 	 * Reject attempts to read non-local temporary relations; we would be
+ 	 * likely to get wrong data since we have no visibility into the owning
+@@ -804,7 +818,17 @@ ReadBufferExtended(Relation reln, ForkNumber forkNum, BlockNumber blockNum,
+ 	buf = ReadBuffer_common(RelationGetSmgr(reln), reln->rd_rel->relpersistence,
+ 							forkNum, blockNum, mode, strategy, &hit);
+ 	if (hit)
++    {
++        /*
++        if (reln->rd_locator.relNumber > 33000)
++        {
++            ereport(NOTICE,
++                errcode(ERRCODE_NO_DATA),
++                errmsg("HIT:%d_%d", reln->rd_locator.relNumber, blockNum));
++        }
++        */
+ 		pgstat_count_buffer_hit(reln);
++    }
+ 	return buf;
+ }
+ 
+@@ -952,13 +976,36 @@ ReadBufferAsync(Relation reln, ForkNumber forkNum, BlockNumber blockNum,
+ 		return ReadBufferExtended(reln, forkNum, blockNum, mode, strategy);
+ 	}
+ 
++    /*
++    if (reln->rd_locator.relNumber == 16552 && blockNum < 150)
++    {
++        ereport(NOTICE,
++            errcode(ERRCODE_NO_DATA),
++            errmsg("Async IO for: dbNode: %d, relNode: %d, blockNum: %d",
++                //reln->rd_node.spcNode,
++                reln->rd_locator.dbOid,
++                reln->rd_locator.relNumber,
++                blockNum));
++    }
++    */
++    
+ 	pgstat_count_buffer_read(reln);
+ 	buf = ReadBufferAsyncWithoutRelcache(RelationGetSmgr(reln), forkNum, blockNum,
+ 										 reln->rd_rel->relpersistence,
+ 										 mode, strategy, already_valid,
+ 										 aiop);
+-	if (already_valid)
++	if (*already_valid)
++    {
++        /*
++        if (reln->rd_locator.relNumber > 33000)
++        {
++            ereport(NOTICE,
++                errcode(ERRCODE_NO_DATA),
++                errmsg("HIT:%d_%d", reln->rd_locator.relNumber, blockNum));
++        }
++        */
+ 		pgstat_count_buffer_hit(reln);
++    }
+ 
+ 	return buf;
+ }
+@@ -2040,7 +2087,7 @@ TryReuseBuffer(Buffer buf_id)
+ 			Assert(ref->refcount == 1);
+ 			ref->refcount--;
+ 			ForgetPrivateRefCountEntry(ref);
+-			ResourceOwnerForgetBuffer(CurrentResourceOwner, buf_id);
++			ResourceOwnerForgetBuffer(CurrentResourceOwner, buf_id, 1);
+ 
+ 			Assert(BUF_STATE_GET_REFCOUNT(pg_atomic_read_u32(&buf_hdr->state)) == 1);
+ 			return true;
+@@ -2260,7 +2307,7 @@ MarkBufferDirty(Buffer buffer)
+ 	uint32		old_buf_state;
+ 
+ 	if (!BufferIsValid(buffer))
+-		elog(ERROR, "bad buffer ID: %d", buffer);
++		elog(ERROR, "bad buffer 1 ID: %d", buffer);
+ 
+ 	if (BufferIsLocal(buffer))
+ 	{
+@@ -2333,7 +2380,7 @@ ReleaseAndReadBuffer(Buffer buffer,
+ 				BufTagMatchesRelFileLocator(&bufHdr->tag, &relation->rd_locator) &&
+ 				BufTagGetForkNum(&bufHdr->tag) == forkNum)
+ 				return buffer;
+-			ResourceOwnerForgetBuffer(CurrentResourceOwner, buffer);
++			ResourceOwnerForgetBuffer(CurrentResourceOwner, buffer, 2);
+ 			LocalRefCount[-buffer - 1]--;
+ 		}
+ 		else
+@@ -2343,8 +2390,19 @@ ReleaseAndReadBuffer(Buffer buffer,
+ 			if (bufHdr->tag.blockNum == blockNum &&
+ 				BufTagMatchesRelFileLocator(&bufHdr->tag, &relation->rd_locator) &&
+ 				BufTagGetForkNum(&bufHdr->tag) == forkNum)
++            {
++                /*
++                if (relation->rd_locator.relNumber > 16000)
++                {
++                    ereport(NOTICE,
++                        errcode(ERRCODE_NO_DATA),
++                        errmsg("RelAndRead called but read didn't happen"));
++                }
++                */
+ 				return buffer;
+-			UnpinBuffer(bufHdr);
++            }
++            if (BufferIsPinned(buffer))
++			    UnpinBuffer(bufHdr);
+ 		}
+ 	}
+ 
+@@ -2545,7 +2603,8 @@ UnpinBuffer(BufferDesc *buf)
+ 	ref = GetPrivateRefCountEntry(b, false);
+ 	Assert(ref != NULL);
+ 
+-	ResourceOwnerForgetBuffer(CurrentResourceOwner, b);
++    if (BufferIsPinned(b))
++	    ResourceOwnerForgetBuffer(CurrentResourceOwner, b, 3);
+ 
+ 	Assert(ref->refcount > 0);
+ 	ref->refcount--;
+@@ -4857,18 +4916,22 @@ void
+ ReleaseBuffer(Buffer buffer)
+ {
+ 	if (!BufferIsValid(buffer))
+-		elog(ERROR, "bad buffer ID: %d", buffer);
++		elog(ERROR, "bad buffer 2 ID: %d", buffer);
++
++    //if (!BufferIsPinned(buffer))
++    //    return;
+ 
+ 	if (BufferIsLocal(buffer))
+ 	{
+-		ResourceOwnerForgetBuffer(CurrentResourceOwner, buffer);
++		ResourceOwnerForgetBuffer(CurrentResourceOwner, buffer, 4);
+ 
+ 		Assert(LocalRefCount[-buffer - 1] > 0);
+ 		LocalRefCount[-buffer - 1]--;
+ 		return;
+ 	}
+ 
+-	UnpinBuffer(GetBufferDescriptor(buffer - 1));
++    if (BufferIsPinned(buffer))
++	    UnpinBuffer(GetBufferDescriptor(buffer - 1));
+ }
+ 
+ /*
+@@ -4930,7 +4993,7 @@ MarkBufferDirtyHint(Buffer buffer, bool buffer_std)
+ 	Page		page = BufferGetPage(buffer);
+ 
+ 	if (!BufferIsValid(buffer))
+-		elog(ERROR, "bad buffer ID: %d", buffer);
++		elog(ERROR, "bad buffer 3 ID: %d", buffer);
+ 
+ 	if (BufferIsLocal(buffer))
+ 	{
+@@ -5932,6 +5995,55 @@ buffertag_comparator(const BufferTag *ba, const BufferTag *bb)
+ 	return 0;
+ }
+ 
++void
++PrintBufferInfo(Buffer buffer)
++{
++    /*
++    BufferDesc *bufHdr;
++    bufHdr = GetBufferDescriptor(buffer - 1);
++
++    ereport(NOTICE,
++        errcode(ERRCODE_NO_DATA),
++        errmsg("AIO_FETCH_%d_%d",
++            bufHdr->tag.relNumber,
++            bufHdr->tag.blockNum));
++    */
++    return;
++}
++    
++
++/*
++** to be used with prefetched page
++** to check if the correct page was prefetched
++**
++** no need to check forkNum as MAIN_FORKNUM will
++** always be prefetched.
++** no need to check namespace and database oid as well
++*/
++bool
++CheckBufferWithTag(Buffer buffer, Relation reln, BlockNumber blockNum)
++{
++    BufferDesc *bufHdr;
++
++    /* Do the same checks as BufferGetBlockNumber. */
++    Assert(BufferIsPinned(buffer));
++
++    if (BufferIsLocal(buffer))
++        // should be unused
++        bufHdr = GetLocalBufferDescriptor(-buffer - 1);
++    else
++        bufHdr = GetBufferDescriptor(buffer - 1);
++
++    /* pinned, so OK to read tag without spinlock */
++    if (reln->rd_locator.relNumber != bufHdr->tag.relNumber)
++        return false;
++
++    if (blockNum != bufHdr->tag.blockNum)
++        return false;
++
++    return true;
++}
++
+ /*
+  * Comparator determining the writeout order in a checkpoint.
+  *
+diff --git a/src/backend/utils/adt/selfuncs.c b/src/backend/utils/adt/selfuncs.c
+index d597b7e81f..1554d1b0b2 100644
+--- a/src/backend/utils/adt/selfuncs.c
++++ b/src/backend/utils/adt/selfuncs.c
+@@ -6189,7 +6189,7 @@ get_actual_variable_endpoint(Relation heapRel,
+ 
+ 	index_scan = index_beginscan(heapRel, indexRel,
+ 								 &SnapshotNonVacuumable,
+-								 1, 0);
++								 1, 0, NULL);
+ 	/* Set it up for index-only scan */
+ 	index_scan->xs_want_itup = true;
+ 	index_rescan(index_scan, scankeys, 1, NULL, 0);
+@@ -6199,7 +6199,7 @@ get_actual_variable_endpoint(Relation heapRel,
+ 	{
+ 		if (!VM_ALL_VISIBLE(heapRel,
+ 							ItemPointerGetBlockNumber(tid),
+-							&vmbuffer))
++							&vmbuffer, NULL))
+ 		{
+ 			/* Rats, we have to visit the heap to check visibility */
+ 			if (!index_fetch_heap(index_scan, tableslot))
+diff --git a/src/backend/utils/resowner/resowner.c b/src/backend/utils/resowner/resowner.c
+index 197a2cdfa2..741980f312 100644
+--- a/src/backend/utils/resowner/resowner.c
++++ b/src/backend/utils/resowner/resowner.c
+@@ -998,11 +998,11 @@ ResourceOwnerRememberBuffer(ResourceOwner owner, Buffer buffer)
+  * Forget that a buffer pin is owned by a ResourceOwner
+  */
+ void
+-ResourceOwnerForgetBuffer(ResourceOwner owner, Buffer buffer)
++ResourceOwnerForgetBuffer(ResourceOwner owner, Buffer buffer, int callID)
+ {
+ 	if (!ResourceArrayRemove(&(owner->bufferarr), BufferGetDatum(buffer)))
+-		elog(ERROR, "buffer %d is not owned by resource owner %s",
+-			 buffer, owner->name);
++		elog(ERROR, "buffer %d is not owned by resource owner %s - %d",
++			 buffer, owner->name, callID);
+ }
+ 
+ /*
+diff --git a/src/include/access/genam.h b/src/include/access/genam.h
+index e1c4fdbd03..5fd62d2614 100644
+--- a/src/include/access/genam.h
++++ b/src/include/access/genam.h
+@@ -14,9 +14,11 @@
+ #ifndef GENAM_H
+ #define GENAM_H
+ 
++#include "access/relscan.h"
+ #include "access/sdir.h"
+ #include "access/skey.h"
+ #include "nodes/tidbitmap.h"
++#include "storage/aio.h"
+ #include "storage/lockdefs.h"
+ #include "utils/relcache.h"
+ #include "utils/snapshot.h"
+@@ -151,7 +153,8 @@ extern bool index_insert(Relation indexRelation,
+ extern IndexScanDesc index_beginscan(Relation heapRelation,
+ 									 Relation indexRelation,
+ 									 Snapshot snapshot,
+-									 int nkeys, int norderbys);
++									 int nkeys, int norderbys,
++                                     struct PgStreamingRead *pgsr);
+ extern IndexScanDesc index_beginscan_bitmap(Relation indexRelation,
+ 											Snapshot snapshot,
+ 											int nkeys);
+diff --git a/src/include/access/heapam.h b/src/include/access/heapam.h
+index b3e94f689a..66b276fcc8 100644
+--- a/src/include/access/heapam.h
++++ b/src/include/access/heapam.h
+@@ -73,6 +73,7 @@ typedef struct HeapScanDescData
+ 	ParallelBlockTableScanWorkerData *rs_parallelworkerdata;
+ 
+ 	struct PgStreamingRead *pgsr;
++    bool pgsrFromExec;
+ 
+ 	/* these fields only used in page-at-a-time mode and for bitmap scans */
+ 	int			rs_cindex;		/* current tuple's index in vistuples */
+@@ -90,6 +91,7 @@ typedef struct IndexFetchHeapData
+ 
+ 	Buffer		xs_cbuf;		/* current heap buffer in scan, if any */
+ 	/* NB: if xs_cbuf is not InvalidBuffer, we hold a pin on that buffer */
++    struct PgStreamingRead *pgsr;
+ } IndexFetchHeapData;
+ 
+ /* Result codes for HeapTupleSatisfiesVacuum */
+@@ -120,7 +122,8 @@ typedef enum
+ extern TableScanDesc heap_beginscan(Relation relation, Snapshot snapshot,
+ 									int nkeys, ScanKey key,
+ 									ParallelTableScanDesc parallel_scan,
+-									uint32 flags);
++									uint32 flags,
++                                    struct PgStreamingRead *pgsr);
+ extern void heap_setscanlimits(TableScanDesc sscan, BlockNumber startBlk,
+ 							   BlockNumber numBlks);
+ extern void heapgetpage(TableScanDesc sscan, BlockNumber page, Buffer buffer);
+diff --git a/src/include/access/nbtree.h b/src/include/access/nbtree.h
+index 9141e29729..d3a03033a9 100644
+--- a/src/include/access/nbtree.h
++++ b/src/include/access/nbtree.h
+@@ -1196,15 +1196,15 @@ extern void _bt_initmetapage(Page page, BlockNumber rootbknum, uint32 level,
+ extern bool _bt_vacuum_needs_cleanup(Relation rel);
+ extern void _bt_set_cleanup_info(Relation rel, BlockNumber num_delpages);
+ extern void _bt_upgrademetapage(Page page);
+-extern Buffer _bt_getroot(Relation rel, int access);
++extern Buffer _bt_getroot(Relation rel, int access, Buffer pgsr_buf);
+ extern Buffer _bt_gettrueroot(Relation rel);
+ extern int	_bt_getrootheight(Relation rel);
+ extern void _bt_metaversion(Relation rel, bool *heapkeyspace,
+ 							bool *allequalimage);
+ extern void _bt_checkpage(Relation rel, Buffer buf);
+-extern Buffer _bt_getbuf(Relation rel, BlockNumber blkno, int access);
++extern Buffer _bt_getbuf(Relation rel, BlockNumber blkno, int access, Buffer pgsr_buf);
+ extern Buffer _bt_relandgetbuf(Relation rel, Buffer obuf,
+-							   BlockNumber blkno, int access);
++							   BlockNumber blkno, int access, Buffer pgsr_buf);
+ extern void _bt_relbuf(Relation rel, Buffer buf);
+ extern void _bt_lockbuf(Relation rel, Buffer buf, int access);
+ extern void _bt_unlockbuf(Relation rel, Buffer buf);
+@@ -1226,7 +1226,8 @@ extern void _bt_pendingfsm_finalize(Relation rel, BTVacState *vstate);
+  * prototypes for functions in nbtsearch.c
+  */
+ extern BTStack _bt_search(Relation rel, BTScanInsert key, Buffer *bufP,
+-						  int access, Snapshot snapshot);
++						  int access, Snapshot snapshot,
++                          struct PgStreamingRead *pgsr);
+ extern Buffer _bt_moveright(Relation rel, BTScanInsert key, Buffer buf,
+ 							bool forupdate, BTStack stack, int access, Snapshot snapshot);
+ extern OffsetNumber _bt_binsrch_insert(Relation rel, BTInsertState insertstate);
+@@ -1234,7 +1235,8 @@ extern int32 _bt_compare(Relation rel, BTScanInsert key, Page page, OffsetNumber
+ extern bool _bt_first(IndexScanDesc scan, ScanDirection dir);
+ extern bool _bt_next(IndexScanDesc scan, ScanDirection dir);
+ extern Buffer _bt_get_endpoint(Relation rel, uint32 level, bool rightmost,
+-							   Snapshot snapshot);
++							   Snapshot snapshot,
++                               struct PgStreamingRead *pgsr);
+ 
+ /*
+  * prototypes for functions in nbtutils.c
+diff --git a/src/include/access/relscan.h b/src/include/access/relscan.h
+index 53a93ccbe7..1b555dd0c4 100644
+--- a/src/include/access/relscan.h
++++ b/src/include/access/relscan.h
+@@ -164,6 +164,8 @@ typedef struct IndexScanDescData
+ 
+ 	/* parallel index scan information, in shared memory */
+ 	struct ParallelIndexScanDescData *parallel_scan;
++
++    struct PgStreamingRead *pgsr;
+ }			IndexScanDescData;
+ 
+ /* Generic structure for parallel scans */
+diff --git a/src/include/access/tableam.h b/src/include/access/tableam.h
+index e45d73eae3..674ec83b13 100644
+--- a/src/include/access/tableam.h
++++ b/src/include/access/tableam.h
+@@ -305,7 +305,8 @@ typedef struct TableAmRoutine
+ 								 Snapshot snapshot,
+ 								 int nkeys, struct ScanKeyData *key,
+ 								 ParallelTableScanDesc pscan,
+-								 uint32 flags);
++								 uint32 flags,
++                                 struct PgStreamingRead *pgsr);
+ 
+ 	/*
+ 	 * Release resources and deallocate scan. If TableScanDesc.temp_snap,
+@@ -434,7 +435,8 @@ typedef struct TableAmRoutine
+ 									  ItemPointer tid,
+ 									  Snapshot snapshot,
+ 									  TupleTableSlot *slot,
+-									  bool *call_again, bool *all_dead);
++									  bool *call_again, bool *all_dead,
++                                      struct PgStreamingRead *pgsr);
+ 
+ 
+ 	/* ------------------------------------------------------------------------
+@@ -788,7 +790,8 @@ typedef struct TableAmRoutine
+ 	 * scan_bitmap_next_tuple need to exist, or neither.
+ 	 */
+ 	bool		(*scan_bitmap_next_block) (TableScanDesc scan,
+-										   struct TBMIterateResult *tbmres);
++										   struct TBMIterateResult *tbmres,
++                                           struct PgStreamingRead *pgsr);
+ 
+ 	/*
+ 	 * Fetch the next tuple of a bitmap table scan into `slot` and return true
+@@ -883,12 +886,12 @@ extern TupleTableSlot *table_slot_create(Relation relation, List **reglist);
+  */
+ static inline TableScanDesc
+ table_beginscan(Relation rel, Snapshot snapshot,
+-				int nkeys, struct ScanKeyData *key)
++				int nkeys, struct ScanKeyData *key, struct PgStreamingRead *pgsr)
+ {
+ 	uint32		flags = SO_TYPE_SEQSCAN |
+ 	SO_ALLOW_STRAT | SO_ALLOW_SYNC | SO_ALLOW_PAGEMODE;
+ 
+-	return rel->rd_tableam->scan_begin(rel, snapshot, nkeys, key, NULL, flags);
++	return rel->rd_tableam->scan_begin(rel, snapshot, nkeys, key, NULL, flags, pgsr);
+ }
+ 
+ /*
+@@ -917,7 +920,7 @@ table_beginscan_strat(Relation rel, Snapshot snapshot,
+ 	if (allow_sync)
+ 		flags |= SO_ALLOW_SYNC;
+ 
+-	return rel->rd_tableam->scan_begin(rel, snapshot, nkeys, key, NULL, flags);
++	return rel->rd_tableam->scan_begin(rel, snapshot, nkeys, key, NULL, flags, NULL);
+ }
+ 
+ /*
+@@ -932,7 +935,7 @@ table_beginscan_bm(Relation rel, Snapshot snapshot,
+ {
+ 	uint32		flags = SO_TYPE_BITMAPSCAN | SO_ALLOW_PAGEMODE;
+ 
+-	return rel->rd_tableam->scan_begin(rel, snapshot, nkeys, key, NULL, flags);
++	return rel->rd_tableam->scan_begin(rel, snapshot, nkeys, key, NULL, flags, NULL);
+ }
+ 
+ /*
+@@ -957,7 +960,7 @@ table_beginscan_sampling(Relation rel, Snapshot snapshot,
+ 	if (allow_pagemode)
+ 		flags |= SO_ALLOW_PAGEMODE;
+ 
+-	return rel->rd_tableam->scan_begin(rel, snapshot, nkeys, key, NULL, flags);
++	return rel->rd_tableam->scan_begin(rel, snapshot, nkeys, key, NULL, flags, NULL);
+ }
+ 
+ /*
+@@ -970,7 +973,7 @@ table_beginscan_tid(Relation rel, Snapshot snapshot)
+ {
+ 	uint32		flags = SO_TYPE_TIDSCAN;
+ 
+-	return rel->rd_tableam->scan_begin(rel, snapshot, 0, NULL, NULL, flags);
++	return rel->rd_tableam->scan_begin(rel, snapshot, 0, NULL, NULL, flags, NULL);
+ }
+ 
+ /*
+@@ -983,7 +986,7 @@ table_beginscan_analyze(Relation rel)
+ {
+ 	uint32		flags = SO_TYPE_ANALYZE;
+ 
+-	return rel->rd_tableam->scan_begin(rel, NULL, 0, NULL, NULL, flags);
++	return rel->rd_tableam->scan_begin(rel, NULL, 0, NULL, NULL, flags, NULL);
+ }
+ 
+ /*
+@@ -1063,7 +1066,7 @@ table_beginscan_tidrange(Relation rel, Snapshot snapshot,
+ 	TableScanDesc sscan;
+ 	uint32		flags = SO_TYPE_TIDRANGESCAN | SO_ALLOW_PAGEMODE;
+ 
+-	sscan = rel->rd_tableam->scan_begin(rel, snapshot, 0, NULL, NULL, flags);
++	sscan = rel->rd_tableam->scan_begin(rel, snapshot, 0, NULL, NULL, flags, NULL);
+ 
+ 	/* Set the range of TIDs to scan */
+ 	sscan->rs_rd->rd_tableam->scan_set_tidrange(sscan, mintid, maxtid);
+@@ -1213,7 +1216,8 @@ table_index_fetch_tuple(struct IndexFetchTableData *scan,
+ 						ItemPointer tid,
+ 						Snapshot snapshot,
+ 						TupleTableSlot *slot,
+-						bool *call_again, bool *all_dead)
++						bool *call_again, bool *all_dead,
++                        struct PgStreamingRead *pgsr)
+ {
+ 	/*
+ 	 * We don't expect direct calls to table_index_fetch_tuple with valid
+@@ -1225,7 +1229,7 @@ table_index_fetch_tuple(struct IndexFetchTableData *scan,
+ 
+ 	return scan->rel->rd_tableam->index_fetch_tuple(scan, tid, snapshot,
+ 													slot, call_again,
+-													all_dead);
++													all_dead, pgsr);
+ }
+ 
+ /*
+@@ -1932,7 +1936,8 @@ table_relation_estimate_size(Relation rel, int32 *attr_widths,
+  */
+ static inline bool
+ table_scan_bitmap_next_block(TableScanDesc scan,
+-							 struct TBMIterateResult *tbmres)
++							 struct TBMIterateResult *tbmres,
++                             struct PgStreamingRead *pgsr)
+ {
+ 	/*
+ 	 * We don't expect direct calls to table_scan_bitmap_next_block with valid
+@@ -1943,7 +1948,8 @@ table_scan_bitmap_next_block(TableScanDesc scan,
+ 		elog(ERROR, "unexpected table_scan_bitmap_next_block call during logical decoding");
+ 
+ 	return scan->rs_rd->rd_tableam->scan_bitmap_next_block(scan,
+-														   tbmres);
++														   tbmres,
++                                                           pgsr);
+ }
+ 
+ /*
+diff --git a/src/include/access/visibilitymap.h b/src/include/access/visibilitymap.h
+index 55f67edb6d..524516e7cb 100644
+--- a/src/include/access/visibilitymap.h
++++ b/src/include/access/visibilitymap.h
+@@ -17,14 +17,15 @@
+ #include "access/visibilitymapdefs.h"
+ #include "access/xlogdefs.h"
+ #include "storage/block.h"
++#include "storage/aio.h"
+ #include "storage/buf.h"
+ #include "utils/relcache.h"
+ 
+ /* Macros for visibilitymap test */
+-#define VM_ALL_VISIBLE(r, b, v) \
+-	((visibilitymap_get_status((r), (b), (v)) & VISIBILITYMAP_ALL_VISIBLE) != 0)
+-#define VM_ALL_FROZEN(r, b, v) \
+-	((visibilitymap_get_status((r), (b), (v)) & VISIBILITYMAP_ALL_FROZEN) != 0)
++#define VM_ALL_VISIBLE(r, b, v, p) \
++	((visibilitymap_get_status((r), (b), (v), (p)) & VISIBILITYMAP_ALL_VISIBLE) != 0)
++#define VM_ALL_FROZEN(r, b, v, p) \
++	((visibilitymap_get_status((r), (b), (v), (p)) & VISIBILITYMAP_ALL_FROZEN) != 0)
+ 
+ extern bool visibilitymap_clear(Relation rel, BlockNumber heapBlk,
+ 								Buffer vmbuf, uint8 flags);
+@@ -34,7 +35,7 @@ extern bool visibilitymap_pin_ok(BlockNumber heapBlk, Buffer vmbuf);
+ extern void visibilitymap_set(Relation rel, BlockNumber heapBlk, Buffer heapBuf,
+ 							  XLogRecPtr recptr, Buffer vmBuf, TransactionId cutoff_xid,
+ 							  uint8 flags);
+-extern uint8 visibilitymap_get_status(Relation rel, BlockNumber heapBlk, Buffer *vmbuf);
++extern uint8 visibilitymap_get_status(Relation rel, BlockNumber heapBlk, Buffer *vmbuf, struct PgStreamingRead *pgsr);
+ extern void visibilitymap_count(Relation rel, BlockNumber *all_visible, BlockNumber *all_frozen);
+ extern BlockNumber visibilitymap_prepare_truncate(Relation rel,
+ 												  BlockNumber nheapblocks);
+diff --git a/src/include/nodes/execnodes.h b/src/include/nodes/execnodes.h
+index 01b1727fc0..8abe6d8dd0 100644
+--- a/src/include/nodes/execnodes.h
++++ b/src/include/nodes/execnodes.h
+@@ -680,6 +680,11 @@ typedef struct EState
+ 	/* The per-query shared memory area to use for parallel execution. */
+ 	struct dsa_area *es_query_dsa;
+ 
++    /*
++    ** ADDITION FOR AIO
++    */
++    struct PgStreamingRead *pgsr;
++
+ 	/*
+ 	 * JIT information. es_jit_flags indicates whether JIT should be performed
+ 	 * and with which options.  es_jit is created on-demand when JITing is
+diff --git a/src/include/storage/bufmgr.h b/src/include/storage/bufmgr.h
+index c5966d8210..f0366d6632 100644
+--- a/src/include/storage/bufmgr.h
++++ b/src/include/storage/bufmgr.h
+@@ -211,6 +211,8 @@ extern bool BgBufferSync(struct PgStreamingWrite *pgsw, struct WritebackContext
+ 
+ extern void TestForOldSnapshot_impl(Snapshot snapshot, Relation relation);
+ 
++extern bool CheckBufferWithTag(Buffer buffer, Relation reln, BlockNumber blockNum);
++
+ /* in buf_init.c */
+ extern void InitBufferPool(void);
+ extern Size BufferShmemSize(void);
+diff --git a/src/include/utils/resowner_private.h b/src/include/utils/resowner_private.h
+index 249f7fe803..c82073d725 100644
+--- a/src/include/utils/resowner_private.h
++++ b/src/include/utils/resowner_private.h
+@@ -29,7 +29,7 @@
+ /* support for buffer refcount management */
+ extern void ResourceOwnerEnlargeBuffers(ResourceOwner owner);
+ extern void ResourceOwnerRememberBuffer(ResourceOwner owner, Buffer buffer);
+-extern void ResourceOwnerForgetBuffer(ResourceOwner owner, Buffer buffer);
++extern void ResourceOwnerForgetBuffer(ResourceOwner owner, Buffer buffer, int callID);
+ 
+ /* support for local lock management */
+ extern void ResourceOwnerRememberLock(ResourceOwner owner, LOCALLOCK *locallock);
