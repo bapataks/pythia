@@ -1,0 +1,60 @@
+                                                                                        QUERY PLAN                                                                                        
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Aggregate  (cost=6032573.41..6032573.42 rows=1 width=268) (actual time=51328.243..51328.248 rows=1 loops=1)
+   Buffers: shared hit=798242 read=3821375
+   ->  Nested Loop  (cost=1.16..6032573.38 rows=1 width=81) (actual time=50510.401..51328.211 rows=4 loops=1)
+         Join Filter: (customer_address.ca_address_sk = customer.c_current_addr_sk)
+         Rows Removed by Join Filter: 5680860
+         Buffers: shared hit=798242 read=3821375
+         ->  Seq Scan on customer_address  (cost=0.00..36288.00 rows=102000 width=35) (actual time=0.179..268.957 rows=101444 loops=1)
+               Filter: (ca_state = ANY ('{GA,NC,SD}'::bpchar[]))
+               Rows Removed by Filter: 898556
+               Buffers: shared read=22538
+         ->  Materialize  (cost=1.16..5993225.39 rows=2 width=54) (actual time=0.472..0.499 rows=56 loops=101444)
+               Buffers: shared hit=798242 read=3798837
+               ->  Nested Loop  (cost=1.16..5993225.38 rows=2 width=54) (actual time=47857.538..50407.465 rows=56 loops=1)
+                     Join Filter: (catalog_sales.cs_item_sk = item.i_item_sk)
+                     Rows Removed by Join Filter: 23477049
+                     Buffers: shared hit=798242 read=3798837
+                     ->  Seq Scan on item  (cost=0.00..16906.00 rows=13301 width=21) (actual time=0.031..113.426 rows=13933 loops=1)
+                           Filter: (i_category = 'Men'::bpchar)
+                           Rows Removed by Filter: 190067
+                           Buffers: shared hit=1 read=14355
+                     ->  Materialize  (cost=1.16..5971132.05 rows=26 width=41) (actual time=1.378..3.489 rows=1685 loops=13933)
+                           Buffers: shared hit=798241 read=3784482
+                           ->  Nested Loop  (cost=1.16..5971131.92 rows=26 width=41) (actual time=19193.934..47764.309 rows=1685 loops=1)
+                                 Buffers: shared hit=798241 read=3784482
+                                 ->  Nested Loop  (cost=0.73..5968439.41 rows=366 width=41) (actual time=19193.193..47624.542 rows=11731 loops=1)
+                                       Buffers: shared hit=753639 read=3782180
+                                       ->  Nested Loop  (cost=0.30..5921722.63 rows=6351 width=37) (actual time=19192.925..45208.827 rows=204002 loops=1)
+                                             Buffers: shared hit=76379 read=3644412
+                                             ->  Seq Scan on catalog_sales  (cost=0.00..5874397.76 rows=1281611 width=41) (actual time=0.159..44763.485 rows=1213654 loops=1)
+                                                   Filter: ((cs_wholesale_cost >= '20'::numeric) AND (cs_wholesale_cost <= '25'::numeric))
+                                                   Rows Removed by Filter: 142778645
+                                                   Buffers: shared hit=69968 read=3644412
+                                             ->  Memoize  (cost=0.30..7.22 rows=1 width=4) (actual time=0.000..0.000 rows=0 loops=1213654)
+                                                   Cache Key: catalog_sales.cs_sold_date_sk
+                                                   Cache Mode: logical
+                                                   Hits: 1211516  Misses: 2138  Evictions: 0  Overflows: 0  Memory Usage: 155kB
+                                                   Buffers: shared hit=6411
+                                                   ->  Index Scan using date_dim_pkey on date_dim  (cost=0.29..7.21 rows=1 width=4) (actual time=0.012..0.012 rows=0 loops=2138)
+                                                         Index Cond: (d_date_sk = catalog_sales.cs_sold_date_sk)
+                                                         Filter: (d_year = 2001)
+                                                         Rows Removed by Filter: 1
+                                                         Buffers: shared hit=6411
+                                       ->  Index Scan using customer_pkey on customer  (cost=0.43..7.36 rows=1 width=12) (actual time=0.012..0.012 rows=0 loops=204002)
+                                             Index Cond: (c_customer_sk = catalog_sales.cs_bill_customer_sk)
+                                             Filter: (c_birth_month = 3)
+                                             Rows Removed by Filter: 1
+                                             Buffers: shared hit=677260 read=137768
+                                 ->  Index Scan using customer_demographics_pkey on customer_demographics  (cost=0.43..7.36 rows=1 width=8) (actual time=0.012..0.012 rows=0 loops=11731)
+                                       Index Cond: (cd_demo_sk = catalog_sales.cs_bill_cdemo_sk)
+                                       Filter: ((cd_gender = 'M'::bpchar) AND (cd_education_status = 'Unknown'::bpchar))
+                                       Rows Removed by Filter: 1
+                                       Buffers: shared hit=44602 read=2302
+ Planning:
+   Buffers: shared hit=454
+ Planning Time: 4.457 ms
+ Execution Time: 51328.933 ms
+(56 rows)
+

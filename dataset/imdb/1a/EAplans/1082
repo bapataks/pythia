@@ -1,0 +1,77 @@
+                                                                                               QUERY PLAN                                                                                               
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Aggregate  (cost=403980.70..403980.71 rows=1 width=8) (actual time=1615.985..1615.990 rows=1 loops=1)
+   Buffers: shared hit=111916 read=53866
+   ->  Nested Loop  (cost=15874.96..403980.69 rows=6 width=0) (actual time=72.359..1615.940 rows=91 loops=1)
+         Buffers: shared hit=111916 read=53866
+         ->  Seq Scan on info_type it2  (cost=0.00..2.41 rows=1 width=4) (actual time=0.022..0.028 rows=1 loops=1)
+               Filter: (id = 7)
+               Rows Removed by Filter: 112
+               Buffers: shared hit=1
+         ->  Nested Loop  (cost=15874.96..403978.22 rows=6 width=4) (actual time=72.335..1615.890 rows=91 loops=1)
+               Buffers: shared hit=111915 read=53866
+               ->  Seq Scan on info_type it1  (cost=0.00..2.41 rows=1 width=4) (actual time=0.007..0.015 rows=1 loops=1)
+                     Filter: (id = 3)
+                     Rows Removed by Filter: 112
+                     Buffers: shared hit=1
+               ->  Nested Loop  (cost=15874.96..403975.74 rows=6 width=8) (actual time=72.326..1615.847 rows=91 loops=1)
+                     Buffers: shared hit=111914 read=53866
+                     ->  Hash Join  (cost=15874.53..403920.08 rows=24 width=12) (actual time=40.030..1571.251 rows=1162 loops=1)
+                           Hash Cond: (ci.role_id = rt.id)
+                           Buffers: shared hit=109059 read=52073
+                           ->  Nested Loop  (cost=15873.37..403917.89 rows=287 width=16) (actual time=39.304..1568.810 rows=18959 loops=1)
+                                 Buffers: shared hit=109058 read=52073
+                                 ->  Nested Loop  (cost=15872.93..403043.18 rows=20 width=20) (actual time=39.272..1354.321 rows=966 loops=1)
+                                       Buffers: shared hit=97676 read=42079
+                                       ->  Hash Join  (cost=15872.49..375963.58 rows=640 width=12) (actual time=39.195..1141.472 rows=1812 loops=1)
+                                             Hash Cond: (t.kind_id = kt.id)
+                                             Buffers: shared hit=89218 read=28252
+                                             ->  Nested Loop  (cost=15871.36..375956.15 rows=1493 width=16) (actual time=39.161..1139.139 rows=15578 loops=1)
+                                                   Buffers: shared hit=89217 read=28252
+                                                   ->  Bitmap Heap Scan on movie_info mi2  (cost=15870.93..358824.04 rows=2166 width=8) (actual time=39.133..351.658 rows=26580 loops=1)
+                                                         Recheck Cond: (info_type_id = 7)
+                                                         Filter: ((info)::text = ANY ('{OFM:Video,"RAT:1.78 : 1 / (high definition)"}'::text[]))
+                                                         Rows Removed by Filter: 1375322
+                                                         Heap Blocks: exact=10050
+                                                         Buffers: shared hit=162 read=10987
+                                                         ->  Bitmap Index Scan on info_type_id_movie_info  (cost=0.00..15870.39 rows=1484527 width=0) (actual time=37.782..37.782 rows=1401902 loops=1)
+                                                               Index Cond: (info_type_id = 7)
+                                                               Buffers: shared read=1099
+                                                   ->  Index Scan using title_pkey on title t  (cost=0.43..7.91 rows=1 width=8) (actual time=0.029..0.029 rows=1 loops=26580)
+                                                         Index Cond: (id = mi2.movie_id)
+                                                         Filter: ((production_year <= 2015) AND (1990 < production_year))
+                                                         Rows Removed by Filter: 0
+                                                         Buffers: shared hit=89055 read=17265
+                                             ->  Hash  (cost=1.10..1.10 rows=3 width=4) (actual time=0.014..0.015 rows=3 loops=1)
+                                                   Buckets: 1024  Batches: 1  Memory Usage: 9kB
+                                                   Buffers: shared hit=1
+                                                   ->  Seq Scan on kind_type kt  (cost=0.00..1.10 rows=3 width=4) (actual time=0.007..0.009 rows=3 loops=1)
+                                                         Filter: ((kind)::text = ANY ('{"tv movie","tv series","video game"}'::text[]))
+                                                         Rows Removed by Filter: 4
+                                                         Buffers: shared hit=1
+                                       ->  Index Scan using movie_id_movie_info on movie_info mi1  (cost=0.43..42.30 rows=1 width=8) (actual time=0.116..0.117 rows=1 loops=1812)
+                                             Index Cond: (movie_id = t.id)
+                                             Filter: ((info_type_id = 3) AND ((info)::text = ANY ('{Documentary,Drama,Short}'::text[])))
+                                             Rows Removed by Filter: 16
+                                             Buffers: shared hit=8458 read=13827
+                                 ->  Index Scan using movie_id_cast_info on cast_info ci  (cost=0.44..43.36 rows=38 width=12) (actual time=0.033..0.218 rows=20 loops=966)
+                                       Index Cond: (movie_id = t.id)
+                                       Buffers: shared hit=11382 read=9994
+                           ->  Hash  (cost=1.15..1.15 rows=1 width=4) (actual time=0.013..0.014 rows=1 loops=1)
+                                 Buckets: 1024  Batches: 1  Memory Usage: 9kB
+                                 Buffers: shared hit=1
+                                 ->  Seq Scan on role_type rt  (cost=0.00..1.15 rows=1 width=4) (actual time=0.008..0.009 rows=1 loops=1)
+                                       Filter: ((role)::text = 'writer'::text)
+                                       Rows Removed by Filter: 11
+                                       Buffers: shared hit=1
+                     ->  Index Scan using name_pkey on name n  (cost=0.43..2.32 rows=1 width=4) (actual time=0.038..0.038 rows=0 loops=1162)
+                           Index Cond: (id = ci.person_id)
+                           Filter: ((gender)::text = 'f'::text)
+                           Rows Removed by Filter: 1
+                           Buffers: shared hit=2855 read=1793
+ Planning:
+   Buffers: shared hit=574
+ Planning Time: 12.977 ms
+ Execution Time: 1616.410 ms
+(73 rows)
+

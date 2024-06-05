@@ -1,0 +1,57 @@
+                                                                                                  QUERY PLAN                                                                                                  
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Aggregate  (cost=715661.61..715661.62 rows=1 width=136) (actual time=10527.305..10527.311 rows=1 loops=1)
+   Buffers: shared hit=920057 read=403892
+   ->  Nested Loop  (cost=2571.81..715661.49 rows=8 width=58) (actual time=10527.300..10527.306 rows=0 loops=1)
+         Buffers: shared hit=920057 read=403892
+         ->  Nested Loop  (cost=2571.67..715660.25 rows=8 width=18) (actual time=10527.300..10527.305 rows=0 loops=1)
+               Buffers: shared hit=920057 read=403892
+               ->  Nested Loop  (cost=2571.24..715550.67 rows=153 width=22) (actual time=99.195..10448.504 rows=2814 loops=1)
+                     Buffers: shared hit=910785 read=402144
+                     ->  Nested Loop  (cost=2570.82..714599.95 rows=1429 width=26) (actual time=80.766..9815.952 rows=25693 loops=1)
+                           Buffers: shared hit=811301 read=398856
+                           ->  Nested Loop  (cost=2570.52..712275.72 rows=8575 width=30) (actual time=78.244..9576.610 rows=188961 loops=1)
+                                 Buffers: shared hit=789725 read=398856
+                                 ->  Hash Join  (cost=2570.10..706541.59 rows=8575 width=22) (actual time=78.194..5108.028 rows=192746 loops=1)
+                                       Hash Cond: (catalog_returns.cr_returned_date_sk = date_dim.d_date_sk)
+                                       Buffers: shared hit=33960 read=398777
+                                       ->  Seq Scan on catalog_returns  (cost=0.00..647267.12 rows=21600412 width=26) (actual time=0.466..3398.785 rows=21598628 loops=1)
+                                             Buffers: shared hit=32613 read=398650
+                                       ->  Hash  (cost=2569.73..2569.73 rows=29 width=4) (actual time=23.254..23.256 rows=30 loops=1)
+                                             Buckets: 1024  Batches: 1  Memory Usage: 10kB
+                                             Buffers: shared hit=1347 read=127
+                                             ->  Seq Scan on date_dim  (cost=0.00..2569.73 rows=29 width=4) (actual time=12.689..23.243 rows=30 loops=1)
+                                                   Filter: ((d_year = 1998) AND (d_moy = 11))
+                                                   Rows Removed by Filter: 73019
+                                                   Buffers: shared hit=1347 read=127
+                                 ->  Index Scan using customer_pkey on customer  (cost=0.43..0.67 rows=1 width=16) (actual time=0.023..0.023 rows=1 loops=192746)
+                                       Index Cond: (c_customer_sk = catalog_returns.cr_returning_customer_sk)
+                                       Buffers: shared hit=755765 read=79
+                           ->  Memoize  (cost=0.29..0.31 rows=1 width=4) (actual time=0.001..0.001 rows=0 loops=188961)
+                                 Cache Key: customer.c_current_hdemo_sk
+                                 Cache Mode: logical
+                                 Hits: 181768  Misses: 7193  Evictions: 0  Overflows: 0  Memory Usage: 520kB
+                                 Buffers: shared hit=21576
+                                 ->  Index Scan using household_demographics_pkey on household_demographics  (cost=0.28..0.30 rows=1 width=4) (actual time=0.013..0.013 rows=0 loops=7193)
+                                       Index Cond: (hd_demo_sk = customer.c_current_hdemo_sk)
+                                       Filter: (hd_buy_potential ~~ '1001-5000%'::text)
+                                       Rows Removed by Filter: 1
+                                       Buffers: shared hit=21576
+                     ->  Index Scan using customer_address_pkey on customer_address  (cost=0.42..0.67 rows=1 width=4) (actual time=0.024..0.024 rows=0 loops=25693)
+                           Index Cond: (ca_address_sk = customer.c_current_addr_sk)
+                           Filter: (ca_gmt_offset = '-7'::numeric)
+                           Rows Removed by Filter: 1
+                           Buffers: shared hit=99484 read=3288
+               ->  Index Scan using customer_demographics_pkey on customer_demographics  (cost=0.43..0.72 rows=1 width=4) (actual time=0.028..0.028 rows=0 loops=2814)
+                     Index Cond: (cd_demo_sk = customer.c_current_cdemo_sk)
+                     Filter: (((cd_marital_status = 'M'::bpchar) AND (cd_education_status = 'Unknown'::bpchar)) OR ((cd_marital_status = 'W'::bpchar) AND (cd_education_status = 'Advanced Degree'::bpchar)))
+                     Rows Removed by Filter: 1
+                     Buffers: shared hit=9272 read=1748
+         ->  Index Scan using call_center_pkey on call_center  (cost=0.14..0.16 rows=1 width=48) (never executed)
+               Index Cond: (cc_call_center_sk = catalog_returns.cr_call_center_sk)
+ Planning:
+   Buffers: shared hit=415
+ Planning Time: 4.592 ms
+ Execution Time: 10528.125 ms
+(53 rows)
+
