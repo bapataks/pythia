@@ -1,0 +1,60 @@
+                                                                            QUERY PLAN                                                                            
+------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Aggregate  (cost=9641466.07..9641466.08 rows=1 width=40) (actual time=79986.663..79986.669 rows=1 loops=1)
+   Buffers: shared hit=337213 read=5128995
+   ->  Nested Loop  (cost=19643.40..9641466.05 rows=2 width=14) (actual time=16017.877..79986.558 rows=63 loops=1)
+         Join Filter: ("substring"((customer_address.ca_zip)::text, 1, 5) <> "substring"((store.s_zip)::text, 1, 5))
+         Rows Removed by Join Filter: 1
+         Buffers: shared hit=337213 read=5128995
+         ->  Nested Loop  (cost=19642.97..9640882.81 rows=76 width=29) (actual time=15902.636..79929.426 rows=3771 loops=1)
+               Buffers: shared hit=323660 read=5127464
+               ->  Hash Join  (cost=19642.54..9630845.57 rows=1312 width=29) (actual time=15901.147..79294.843 rows=67803 loops=1)
+                     Hash Cond: (store_sales.ss_item_sk = item.i_item_sk)
+                     Buffers: shared hit=54142 read=5127462
+                     ->  Nested Loop  (cost=2570.28..9613720.49 rows=20121 width=25) (actual time=15750.090..79015.259 rows=897784 loops=1)
+                           Buffers: shared hit=39997 read=5127251
+                           ->  Hash Join  (cost=2570.12..9612578.98 rows=20121 width=18) (actual time=15750.049..78746.638 rows=908717 loops=1)
+                                 Hash Cond: (store_sales.ss_sold_date_sk = date_dim.d_date_sk)
+                                 Buffers: shared hit=39778 read=5127248
+                                 ->  Seq Scan on store_sales  (cost=0.00..9485539.52 rows=47414263 width=22) (actual time=0.052..75587.537 rows=48370740 loops=1)
+                                       Filter: ((ss_wholesale_cost >= '9'::numeric) AND (ss_wholesale_cost <= '29'::numeric))
+                                       Rows Removed by Filter: 239626284
+                                       Buffers: shared hit=38304 read=5127248
+                                 ->  Hash  (cost=2569.73..2569.73 rows=31 width=4) (actual time=20.834..20.835 rows=31 loops=1)
+                                       Buckets: 1024  Batches: 1  Memory Usage: 10kB
+                                       Buffers: shared hit=1474
+                                       ->  Seq Scan on date_dim  (cost=0.00..2569.73 rows=31 width=4) (actual time=9.873..20.817 rows=31 loops=1)
+                                             Filter: ((d_year = 1999) AND (d_moy = 3))
+                                             Rows Removed by Filter: 73018
+                                             Buffers: shared hit=1474
+                           ->  Memoize  (cost=0.16..5.73 rows=1 width=15) (actual time=0.000..0.000 rows=1 loops=908717)
+                                 Cache Key: store_sales.ss_store_sk
+                                 Cache Mode: logical
+                                 Hits: 908605  Misses: 112  Evictions: 0  Overflows: 0  Memory Usage: 13kB
+                                 Buffers: shared hit=219 read=3
+                                 ->  Index Scan using store_pkey on store  (cost=0.15..5.72 rows=1 width=15) (actual time=0.016..0.016 rows=1 loops=112)
+                                       Index Cond: (s_store_sk = store_sales.ss_store_sk)
+                                       Buffers: shared hit=219 read=3
+                     ->  Hash  (cost=16906.00..16906.00 rows=13301 width=12) (actual time=150.901..150.902 rows=13933 loops=1)
+                           Buckets: 16384  Batches: 1  Memory Usage: 727kB
+                           Buffers: shared hit=14145 read=211
+                           ->  Seq Scan on item  (cost=0.00..16906.00 rows=13301 width=12) (actual time=0.017..147.293 rows=13933 loops=1)
+                                 Filter: (i_category = 'Men'::bpchar)
+                                 Rows Removed by Filter: 190067
+                                 Buffers: shared hit=14145 read=211
+               ->  Index Scan using customer_pkey on customer  (cost=0.43..7.65 rows=1 width=8) (actual time=0.009..0.009 rows=0 loops=67803)
+                     Index Cond: (c_customer_sk = store_sales.ss_customer_sk)
+                     Filter: (c_birth_month = 3)
+                     Rows Removed by Filter: 1
+                     Buffers: shared hit=269518 read=2
+         ->  Index Scan using customer_address_pkey on customer_address  (cost=0.42..7.65 rows=1 width=15) (actual time=0.015..0.015 rows=0 loops=3771)
+               Index Cond: (ca_address_sk = customer.c_current_addr_sk)
+               Filter: (ca_state = 'MI'::bpchar)
+               Rows Removed by Filter: 1
+               Buffers: shared hit=13553 read=1531
+ Planning:
+   Buffers: shared hit=460
+ Planning Time: 4.920 ms
+ Execution Time: 79987.192 ms
+(56 rows)
+
