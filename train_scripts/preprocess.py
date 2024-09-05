@@ -41,19 +41,24 @@ if __name__ == "__main__":
   train_folder = os.path.join("dataset", sys.argv[1], sys.argv[2], "train_test_files")
   print("Creating vocab for input to model: {} - {}".format(train_folder, sys.argv[3]))
 
+  # check if template workload exists
   if not os.path.exists(train_folder):
     print("Incorrect path for training files")
     exit(2)
 
+  # handle IMDB dataset separately
   if sys.argv[1] == "imdb":
     input_files = [sys.argv[3]+"MLtrain_input.csv", sys.argv[3]+"MLtest_input.csv"]
   else:
     input_files = [sys.argv[3]+"_MLtrain_input.csv", sys.argv[3]+"_MLtest_input.csv"]
+
+  # check if the files to be encoded exist
   for inpFile in input_files:
     if not os.path.exists(os.path.join(train_folder, inpFile)):
       print("Train/Test file does not exist")
       exit(3)
 
+  # check if the output directory exists
   if not os.path.exists(os.path.join(train_folder, "encoded_input")):
     print("\"encoded_input\" directory not present")
     exit(4)

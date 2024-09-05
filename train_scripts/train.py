@@ -17,6 +17,7 @@ def train_model(inpFile, outFile, posFile, nTokens, modelFile):
   posW = posW / 2
   num_classes = posW.shape[0]
 
+  # define our model
   model = TransformerEncoderModel(
             EMBEDDING_SIZE,
             nTokens,
@@ -65,6 +66,7 @@ def train_model(inpFile, outFile, posFile, nTokens, modelFile):
     toc = time.perf_counter()
     print(f"Time taken for epoch {epoch}: {toc - tic:0.4f} seconds")
 
+    # check for stopping condition
     if float(prev_loss - np.mean(epoch_loss)) < STOP_LOSS_DELTA:
       count += 1
       if count >= STOP_LOSS_COUNT:
@@ -93,10 +95,12 @@ if __name__ == "__main__":
   train_folder = os.path.join("dataset", sys.argv[1], sys.argv[2], "train_test_files")
   print("Training model : {} - {}".format(train_folder, sys.argv[3]))
 
+  # check if template workload exists
   if not os.path.exists(train_folder):
     print("Incorrect path for training files")
     exit(2)
 
+  # handle IMDB separately
   if sys.argv[1] == "imdb":
     input_file = sys.argv[3]+"MLtrain_input.csv"
     output_file = sys.argv[3]+"MLtrain_output.csv"
@@ -118,6 +122,7 @@ if __name__ == "__main__":
     output_files[p] = sys.argv[3]+fileIdent[p]+"MLtrain_output.csv"
     posW_files[p] = "posW"+fileIdent[p]+sys.argv[3]+".npy"
 
+  # check if training files exist
   if not os.path.exists(os.path.join(train_folder, "encoded_input", input_file)):
     print("Train input file does not exist")
     exit(3)
@@ -132,6 +137,7 @@ if __name__ == "__main__":
       print("Train posW file does not exist: {}".format(posWFile))
       exit(5)
 
+  # check if output folder exists
   model_folder = os.path.join("models", sys.argv[1], sys.argv[2])
   if not os.path.exists(model_folder):
     print("Model folder not present")

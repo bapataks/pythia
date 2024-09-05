@@ -108,6 +108,9 @@ if __name__ == "__main__":
   print(testFiles)
 
   vocabDict = loadVocab(os.path.join(tmp_folder, "train_test_files", "encoded_input"), relationDict[sys.argv[2]])
+  #if sys.argv[1] == "imdb":
+    
+
   modelIdxDict, modelMainDict = loadModels(model_folder, relationDict[sys.argv[2]], vocabDict)
 
   tic = time.perf_counter()
