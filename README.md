@@ -17,10 +17,11 @@ Following is included in this repo:
 Train and Test
 --------------
 If you want to use the given datasets, just ensure that all zipped files are unzipped and ready to be used.
-From the root folder, run the following command
-python trainAndTest.py <benchmark> <template>
+From the root folder, run the following command:
 
-Sample: python trainAndTest.py dsb tmp018
+python fullTrainAndTest.py <benchmark> <template>
+
+Sample: python fullTrainAndTest.py dsb tmp018
 
   The above command internally does the following steps which can be run separately if needed.
   1. Encode serialized input file to create a vocabulary object for a relation. ("train\_scripts/preprocess.py")
