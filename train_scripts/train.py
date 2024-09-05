@@ -97,6 +97,19 @@ if __name__ == "__main__":
     print("Incorrect path for training files")
     exit(2)
 
+  if sys.argv[1] == "imdb":
+    input_file = sys.argv[3]+"MLtrain_input.csv"
+    output_file = sys.argv[3]+"MLtrain_output.csv"
+    posFile = "posW_"+sys.argv[3]+".npy"
+
+    vocab_obj = Vocab()
+    vocab_obj.read_vocab_from_file(os.path.join(train_folder, "encoded_input", sys.argv[3]+"_vocab_file_input.csv"))
+
+    train_model(os.path.join(train_folder, "encoded_input", input_file), os.path.join(train_folder, output_file), os.path.join(train_folder, posFile), vocab_obj.n_words, os.path.join(model_folder, sys.argv[3]))
+
+    exit(0)
+
+
   parts = ["idx", "0"]
   input_file = sys.argv[3]+"_MLtrain_input.csv"
   output_files = {}

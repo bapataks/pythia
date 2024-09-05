@@ -45,7 +45,10 @@ if __name__ == "__main__":
     print("Incorrect path for training files")
     exit(2)
 
-  input_files = [sys.argv[3]+"_MLtrain_input.csv", sys.argv[3]+"_MLtest_input.csv"]
+  if sys.argv[1] == "imdb":
+    input_files = [sys.argv[3]+"MLtrain_input.csv", sys.argv[3]+"MLtest_input.csv"]
+  else:
+    input_files = [sys.argv[3]+"_MLtrain_input.csv", sys.argv[3]+"_MLtest_input.csv"]
   for inpFile in input_files:
     if not os.path.exists(os.path.join(train_folder, inpFile)):
       print("Train/Test file does not exist")

@@ -43,4 +43,5 @@ RSizeDict["IT"] = 14356
 RSizeDict["ST"] = 18
 RSizeDict["CUDE"] = 22413
 
-
+# IMDB
+sizeIMDB = 252885

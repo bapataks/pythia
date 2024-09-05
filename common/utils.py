@@ -3,8 +3,8 @@ import os
 fileIdent = {"idx": "_I_", "0": "_R_0"}
 nameIdent = {"idx": "index", "0": "base table, part 0"}
 
-#relationDict = {"tmp018": ["CUAD", "CUDE", "DT", "IT", "CU"]}
-relationDict = {"tmp018": ["DT"]}
+relationDict = {"tmp018": ["CUAD", "CUDE", "DT", "IT", "CU"], "tmp019": ["DT", "IT", "ST", "CUAD", "CU"], "tmp091": ["CC", "CUAD", "CUDE", "HDE", "CU"], "1a": ["182054"]}
+
 
 # Class for vocabulary object
 # Dictionaries from word to index, index to word and word frequency

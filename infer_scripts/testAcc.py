@@ -117,7 +117,7 @@ def tst_model(query, planSeq, vocab, mI, mR, relKeys, testInpDict, testOutDict):
  
 if __name__ == "__main__":
   if len(sys.argv) != 3 and len(sys.argv) != 4:
-    print("Usage: python infer_scripts/genSeq.py <dataset> <template> [<file>]")
+    print("Usage: python infer_scripts/testAcc.py <dataset> <template> [<file>]")
     exit(1)
 
   tmp_folder = os.path.join("dataset", sys.argv[1], sys.argv[2])
