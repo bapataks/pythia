@@ -67,6 +67,7 @@ if __name__ == "__main__":
     print("Usage: python infer_scripts/genSeq.py <dataset> <template> [<file>]")
     exit(1)
 
+  # check if template workload exists
   tmp_folder = os.path.join("dataset", sys.argv[1], sys.argv[2])
   if not os.path.exists(tmp_folder):
     print("Incorrect path for template files")
@@ -80,6 +81,7 @@ if __name__ == "__main__":
     print("Incorrect path for query plans")
     exit(4)
 
+  # gather all test files
   if len(sys.argv) == 4:
     if not os.path.exists(os.path.join(tmp_folder, "queries", sys.argv[3])):
       print("No such file")
@@ -94,11 +96,13 @@ if __name__ == "__main__":
     files = os.listdir(os.path.join(tmp_folder, "queries"))
     testFiles = filter(lambda x: x.startswith("t", files))
 
+  # check if the models are present
   model_folder = os.path.join("models", sys.argv[1], sys.argv[2])
   if not os.path.exists(model_folder):
     print("Model folder not found")
     exit(7)
 
+  # check if the output folder exists
   seq_folder = os.path.join("seqFiles", sys.argv[1], sys.argv[2])
   if not os.path.exists(seq_folder):
     print("Sequence predictin folder not found")
@@ -108,9 +112,35 @@ if __name__ == "__main__":
   print(testFiles)
 
   vocabDict = loadVocab(os.path.join(tmp_folder, "train_test_files", "encoded_input"), relationDict[sys.argv[2]])
-  #if sys.argv[1] == "imdb":
-    
 
+  # handle IMDB separately
+  # We only have one model for the base table
+  if sys.argv[1] == "imdb":
+    modelIMDB = TransformerEncoderModel(
+                  EMBEDDING_SIZE,
+                  vocabDict[relationDict[sys.argv[2]]].n_words,
+                  NHEAD,
+                  HIDDEN_SIZE,
+                  NUM_LAYERS,
+                  DROPOUT,
+                  sizeIMDB,
+                  PAD_IDX,
+                  device
+                ).to(device)
+    modelIMDB.load_state_dict(torch.load(os.path.join(modelFolder, sys.argv[3])))
+    modelIMDB.eval()
+
+    for file in testFiles:
+      qEmbed = getEmbed(tmp_folder, file)
+      seqFile = os.path.join(seq_folder, file+"_predSeq.txt")
+      seqOut = open(seqFile, "w")
+
+      writePages(seqOut, relationDict[sys.argv[2]], "0", qEmbed, vocabDict[relationDict[sys.argv[2]]], modelIMDB)
+
+      seqOut.close()
+    exit(0)
+
+  # Resume for DSB workloads
   modelIdxDict, modelMainDict = loadModels(model_folder, relationDict[sys.argv[2]], vocabDict)
 
   tic = time.perf_counter()

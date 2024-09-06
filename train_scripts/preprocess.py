@@ -37,7 +37,7 @@ if __name__ == "__main__":
   if len(sys.argv) != 4:
     print("Usage: python train_scripts/preprocess.py <dataset> <template> <relation>")
     exit(1)
-    
+
   train_folder = os.path.join("dataset", sys.argv[1], sys.argv[2], "train_test_files")
   print("Creating vocab for input to model: {} - {}".format(train_folder, sys.argv[3]))
 

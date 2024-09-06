@@ -113,7 +113,6 @@ if __name__ == "__main__":
 
     exit(0)
 
-
   parts = ["idx", "0"]
   input_file = sys.argv[3]+"_MLtrain_input.csv"
   output_files = {}

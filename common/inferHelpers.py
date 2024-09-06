@@ -29,6 +29,7 @@ def loadModels(modelFolder, relations, vocabDict):
                           device
                         ).to(device)
     modelIdxDict[rel].load_state_dict(torch.load(os.path.join(modelFolder, rel+"_idx")))
+    modelIdxDict[rel].eval()
 
     modelMainDict[rel] = TransformerEncoderModel(
                           EMBEDDING_SIZE,
@@ -42,6 +43,7 @@ def loadModels(modelFolder, relations, vocabDict):
                           device
                         ).to(device)
     modelMainDict[rel].load_state_dict(torch.load(os.path.join(modelFolder, rel+"_0")))
+    modelMainDict[rel].eval()
 
   return modelIdxDict, modelMainDict
 

@@ -7,7 +7,7 @@ import os
 import sys
 import torch
 
-def getVal(rel, part, query, vocab, model, testInpFile, testOutFile):
+def getVal(rel, query, vocab, model, testInpFile, testOutFile):
   tp = 0
   fp = 0
   fn = 0
@@ -78,9 +78,9 @@ def calculatePRF1(tp, fp, fn, relKeys):
   return p, r, f1
 
 def tst_model(query, planSeq, vocab, mI, mR, relKeys, testInpDict, testOutDict):
-  tpD = {"ALL":0}
-  fpD = {"ALL":0}
-  fnD = {"ALL":0}
+  tpD = {"ALL": 0}
+  fpD = {"ALL": 0}
+  fnD = {"ALL": 0}
 
   for k in relKeys:
     tpD[k] = -1
@@ -97,11 +97,11 @@ def tst_model(query, planSeq, vocab, mI, mR, relKeys, testInpDict, testOutDict):
         if rel not in vocab:
           print("Warning: One of the models not found - {}".format(rel))
         else:
-          tp, fp, fn = getVal(rel, "idx", query, vocab[rel], mI[rel], testInpDict[rel], testOutDict[rel]["idx"])
+          tp, fp, fn = getVal(rel, query, vocab[rel], mI[rel], testInpDict[rel], testOutDict[rel]["idx"])
           tpD[rel] += tp + 1
           fpD[rel] += fp + 1
           fnD[rel] += fn + 1
-          tp, fp, fn = getVal(rel, "0", query, vocab[rel], mR[rel], testInpDict[rel], testOutDict[rel]["0"])
+          tp, fp, fn = getVal(rel, query, vocab[rel], mR[rel], testInpDict[rel], testOutDict[rel]["0"])
           tpD[rel] += tp
           fpD[rel] += fp
           fnD[rel] += fn
@@ -120,6 +120,7 @@ if __name__ == "__main__":
     print("Usage: python infer_scripts/testAcc.py <dataset> <template> [<file>]")
     exit(1)
 
+  # check if template workload exists
   tmp_folder = os.path.join("dataset", sys.argv[1], sys.argv[2])
   if not os.path.exists(tmp_folder):
     print("Incorrect path for template files")
@@ -133,6 +134,7 @@ if __name__ == "__main__":
     print("Incorrect path for query plans")
     exit(4)
 
+  # gather all test files
   if len(sys.argv) == 4:
     if not os.path.exists(os.path.join(tmp_folder, "queries", sys.argv[3])):
       print("No such file")
@@ -147,17 +149,59 @@ if __name__ == "__main__":
     files = os.listdir(os.path.join(tmp_folder, "queries"))
     testFiles = filter(lambda x: x.startswith("t", files))
 
+  # check if the models are present
   model_folder = os.path.join("models", sys.argv[1], sys.argv[2])
   if not os.path.exists(model_folder):
     print("Model folder not found")
     exit(7)
 
   vocabDict = loadVocab(os.path.join(tmp_folder, "train_test_files", "encoded_input"), relationDict[sys.argv[2]])
+
+  # handle IMDB separately
+  # We only have one model for the base table
+  if sys.argv[1] == "imdb":
+    modelIMDB = TransformerEncoderModel(
+                  EMBEDDING_SIZE,
+                  vocabDict[relationDict[sys.argv[2]]].n_words,
+                  NHEAD,
+                  HIDDEN_SIZE,
+                  NUM_LAYERS,
+                  DROPOUT,
+                  sizeIMDB,
+                  PAD_IDX,
+                  device
+                ).to(device)
+    modelIMDB.load_state_dict(torch.load(os.path.join(modelFolder, sys.argv[3])))
+    modelIMDB.eval()
+
+    testInpFile = relationDict[sys.argv[2]]+"MLtest_input.csv"
+    testOutFile = relationDict[sys.argv[2]]+"MLtest_output.csv"
+    f1Dict = {}
+
+    for file in testFiles:
+      qEmbed = getEmbed(tmp_folder, file)
+
+      tp, fp, fn = getVal(relationDict[sys.argv[2]], qEmbed, vocabDict[relationDict[sys.argv[2]]], modelIMDB, testInpFile, testOutFile)
+      tpD = {"ALL": tp}
+      fpD = {"ALL": fp}
+      fnD = {"ALL": fn}
+      p, r, f1 = calculatePRF1(tpD, fpD, fnD, ["ALL"])
+
+      f1Dict[file] = f1["ALL"]
+
+    print("F1 score for {}".format(tmp_folder))
+    print(testFiles)
+    print(f1Dict)
+
+    exit(0)
+
+  # Resume for DSB workloads
   modelIdxDict, modelMainDict = loadModels(model_folder, relationDict[sys.argv[2]], vocabDict)
 
-  pAll = {"ALL":[]}
-  rAll = {"ALL":[]}
-  f1All = {"ALL":[]}
+  # initialize structures
+  pAll = {"ALL": []}
+  rAll = {"ALL": []}
+  f1All = {"ALL": []}
   f1Dict = {}
 
   testInpDict = {}

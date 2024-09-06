@@ -452,18 +452,18 @@ def getEmbed_tmp091(tmp_folder, file):
       qEmbed.append(list(filter(lambda x: "ca_gmt_offset" in x, lines))[0].split('= ')[1])
 
     elif "customer_demographics" in node:
-      qEmbed += ["RELN_IDX", "CUDE"] #, "PRED", "MS"]
+      qEmbed += ["RELN_IDX", "CUDE"]
 
     elif "household_demographics" in node:
       qEmbed += ["RELN_IDX", "HDE", "PRED", "BUY_POT"]
       qEmbed.append(list(filter(lambda x: "hd_buy_potential" in x, lines))[0].split('\'')[1])
 
     elif "customer" in node:
-      qEmbed += ["RELN_IDX", "CU"] #, "PRED", "MONTH"]
+      qEmbed += ["RELN_IDX", "CU"]
 
     elif "date_dim" in node:
       if "Index" in node:
-        qEmbed += ["RELN_IDX", "DT"] #, "PRED", "YEAR"]
+        qEmbed += ["RELN_IDX", "DT"]
       else:
         qEmbed += ["RELN_SEQ", "DT", "PRED", "YEAR"]
       qEmbed.append(list(filter(lambda x: "d_year" in x, lines))[0].split('= ')[1])
@@ -481,3 +481,86 @@ def getEmbed_tmp091(tmp_folder, file):
       qEmbed.append("CC")
 
   return qEmbed, tabSeq
+
+def getEmbed_imdb(tmp_folder, file):
+  qEmbed = []
+
+  with open(os.path.join(tmp_folder, "EAplans", file), "r") as f:
+    lines = [line.rstrip().lstrip() for line in f]
+  plan = list(filter(lambda x: "Nested Loop" in x or "Hash Join" in x or "Merge Join" in x or "Scan" in x, lines))
+
+  prevText = ""
+  for i in range(len(plan)):
+    plan[i] += prevText
+    prevText = ""
+
+    if "Bitmap Heap Scan" in plan[i]:
+      if "mi1" in plan[i]:
+        prevText = "mi1"
+      else:
+        prevText = "mi2"
+  plan = list(filter(lambda x: "Bitmap Heap Scan" not in x, plan))
+
+  with open(os.path.join(tmp_folder, "queries", file), "r") as f:
+    lines = [line.rstrip().lstrip() for line in f]
+
+  for node in plan:
+    if "Nested Loop" in node:
+      qEmbed.append("NLJ")
+
+    elif "Hash Join" in node:
+      qEmbed.append("HJ")
+
+    elif "Merge Join" in node:
+      qEmbed.append("MJ")
+
+    elif "title" in node:
+      if "title_pkey" in node:
+        qEmbed += ["RELN_IDX", "TTL_PK"]
+      elif "kind_id_title" in node:
+        qEmbed += ["RELN_IDX", "TTL_KI"]
+      else:
+        qEmbed += ["RELN_SEQ", "TTL"]
+      qEmbed += ["PRED", "YEAR"]
+      qEmbed.append(list(filter(lambda x: "production_year" in x, lines))[0].split("<= ")[1])
+      qEmbed.append(list(filter(lambda x: "production_year" in x, lines))[1].split(" <")[0].split("AND ")[1])
+
+    elif "kind_type" in node:
+      if "kind_type_pkey" in node:
+        qEmbed += ["RELN_IDX", "KT"]
+      else:
+        qEmbed += ["RELN_SEQ", "KT"]
+      qEmbed += list(filter(lambda x: "kind" in x, lines))[2].split('(')[1].split(')')[0].split(',')
+
+    elif "mi1" in node:
+      if "movie_id_movie_info" in node:
+        qEmbed += ["RELN_IDX", "MI_MI"]
+      else:
+        qEmbed += ["RELN_IDX", "MI_IT"]
+      qEmbed += list(filter(lambda x: "mi1.info" in x, lines))[1].split('(')[1].split(')')[0].split(',')
+
+    elif "mi2" in node:
+      if "movie_id_movie_info" in node:
+        qEmbed += ["RELN_IDX", "MI_MI"]
+      else:
+        qEmbed += ["RELN_IDX", "MI_IT"]
+      qEmbed += list(filter(lambda x: "mi2.info" in x, lines))[1].split('(')[1].split(')')[0].split(',')
+
+    elif "it1" in node or "it2" in node:
+      qEmbed += ["RELN_SEQ", "IT"]
+
+    elif "cast_info" in node:
+      if "movie_id_cast_info" in node:
+        qEmbed += ["RELN_IDX", "CI_MI"]
+      else:
+        qEmbed += ["RELN_IDX", "CI_RI"]
+
+    elif "role_type" in node:
+      qEmbed += ["RELN_SEQ", "RT"]
+      qEmbed += list(filter(lambda x: "rt.role" in x, lines))[0].split('(')[1].split(')')[0].split(',')
+
+    elif "name" in node:
+      qEmbed += ["RELN_IDX", "NM"]
+      qEmbed += list(filter(lambda x: "n.gender" in x, lines))[0].split('(')[1].split(')')[0].split(',')
+
+  return qEmbed
