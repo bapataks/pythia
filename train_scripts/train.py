@@ -1,13 +1,15 @@
-from common.model import TransformerEncoderModel
-from common.modelConstants import *
-from common.trainHelpers import *
-from common.utils import *
 import numpy as np
 import sys
 import time
 import torch
 import torch.nn as nn
 import torch.optim as optim
+
+sys.path.append(os.getcwd())
+from common.model import TransformerEncoderModel
+from common.modelConstants import *
+from common.trainHelpers import *
+from common.utils import *
 
 def train_model(inpFile, outFile, posFile, nTokens, modelFile):
   posW = torch.FloatTensor(np.load(posFile)).to(device)

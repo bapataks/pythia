@@ -1,11 +1,13 @@
+import os
+import sys
+import torch
+
+sys.path.append(os.getcwd())
 from common.databaseConstants import *
 from common.embedQuery import *
 from common.inferHelpers import *
 from common.model import TransformerEncoderModel
 from common.utils import *
-import os
-import sys
-import torch
 
 def getVal(rel, query, vocab, model, testInpFile, testOutFile):
   tp = 0
