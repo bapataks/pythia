@@ -14,5 +14,4 @@ STOP_LOSS_DELTA = 0.005
 STOP_LOSS_COUNT = 3
 MAX_EPOCH = 35
 
-#device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-device = torch.device('cpu' if torch.cuda.is_available() else 'cpu')
+device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')

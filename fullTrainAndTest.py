@@ -13,11 +13,11 @@ if not os.path.exists(train_folder):
   exit(2)
 
 print("Encoding input files...")
-for rel in relationDict:
+for rel in relationDict[sys.argv[2]]:
   subprocess.run(["python", "train_scripts/preprocess.py", sys.argv[1], sys.argv[2], rel])
 
 print("Training models...")
-for rel in relationDict:
+for rel in relationDict[sys.argv[2]]:
   subprocess.run(["python", "train_scripts/train.py", sys.argv[1], sys.argv[2], rel])
 
 print("Generating prediction sequence...")
