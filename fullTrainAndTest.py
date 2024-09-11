@@ -14,14 +14,14 @@ if not os.path.exists(train_folder):
 
 print("Encoding input files...")
 for rel in relationDict:
-  subprocess.run("python", "train_scripts/preprocess.py", sys.argv[1], sys.argv[2], rel)
+  subprocess.run(["python", "train_scripts/preprocess.py", sys.argv[1], sys.argv[2], rel])
 
 print("Training models...")
 for rel in relationDict:
-  subprocess.run("python", "train_scripts/train.py", sys.argv[1], sys.argv[2], rel)
+  subprocess.run(["python", "train_scripts/train.py", sys.argv[1], sys.argv[2], rel])
 
 print("Generating prediction sequence...")
-subprocess.run("python", "infer_scripts/genSeq.py", sys.argv[1], sys.argv[2])
+subprocess.run(["python", "infer_scripts/genSeq.py", sys.argv[1], sys.argv[2]])
 
 print("Predicton Accuracy...")
-subprocess.run("python", "infer_scripts/testAcc.py", sys.argv[1], sys.argv[2])
+subprocess.run(["python", "infer_scripts/testAcc.py", sys.argv[1], sys.argv[2]])
