@@ -13,7 +13,7 @@ for rootFolder in ["models", "seqFiles"]:
 
 ttf = "train_test_files"
 
-for benchamrk in folderDict:
+for benchmark in folderDict:
   for template in folderDict[benchmark]:
     if not os.path.exists(os.path.join("dataset", benchmark, template, ttf, "encoded_input")):
       os.mkdir(os.path.join("dataset", benchmark, template, ttf, "encoded_input"))
