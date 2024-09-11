@@ -149,7 +149,7 @@ if __name__ == "__main__":
     testFiles = [sys.argv[3]]
   else:
     files = os.listdir(os.path.join(tmp_folder, "queries"))
-    testFiles = filter(lambda x: x.startswith("t", files))
+    testFiles = filter(lambda x: x.startswith("t"), files)
 
   # check if the models are present
   model_folder = os.path.join("models", sys.argv[1], sys.argv[2])

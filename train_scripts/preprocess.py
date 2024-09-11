@@ -1,7 +1,7 @@
 import os
 import sys
 
-sys.pathappend(os.getcwd())
+sys.path.append(os.getcwd())
 from common.utils import Vocab
 
 # This function takes a Vocab class object
