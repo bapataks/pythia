@@ -16,18 +16,22 @@ Following is included in this repo:
 
 Train and Test
 --------------
-If you want to use the given datasets, just ensure that all zipped files are unzipped and ready to be used.
+If you want to use the given datasets,
 From the root folder, run the following command:
 
-python fullTrainAndTest.py <benchmark> <template>
-
+1. python setup.py
+   This command prepares the directory structure for the other scripts to run.
+   It also unzips the compressed files so that they can be used.
+3. python fullTrainAndTest.py <benchmark> <template>
+   This command trains models for a particular template workload and
+   subsequently prints F1-score for all test queries.
+   
 Sample: python fullTrainAndTest.py dsb tmp018
-
-  The above command internally does the following steps which can be run separately if needed.
+  The above command internally does the following steps for template 18 of DSB which can be run separately if needed.
   1. Encode serialized input file to create a vocabulary object for a relation. ("train\_scripts/preprocess.py")
-  2. Train a model for a relation. ("train\_scripts/train.py")
+  2. Train models for a relation. ("train\_scripts/train.py")
   3. Generate prediction sequence for all test files. ("infer\_scripts/genSeq.py")
-  4. Calculate F1-score for al test file predictions. ("infer\_scripts/testAcc.py")
+  4. Calculate F1-score for all test file predictions. ("infer\_scripts/testAcc.py")
 
 Load Database
 -------------
