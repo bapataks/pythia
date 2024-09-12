@@ -23,7 +23,7 @@ From the root folder, run the following command:
 
    This command prepares the directory structure for the other scripts to run.
    It also unzips the compressed files so that they can be used.
-2. python fullTrainAndTest.py <benchmark> <template>
+2. python fullTrainAndTest.py [benchmark] [template]
 
    This command trains models for a particular template workload and
    subsequently prints F1-score for all test queries.
