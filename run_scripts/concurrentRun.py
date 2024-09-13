@@ -5,19 +5,23 @@ import random
 import subprocess
 import numpy as np
 
-## revision experiment
+## script to
 ## inject delays for queries
-## use multiple workloads
+## using multiple workloads
+
+# Modify the following for the script to work
+path_to_result = "[ADDME]" # where the result files will be written
+path_to_dataset = "[ADDME]" # dataset/benchmark folder
+path_to_prefetchFiles = "[ADDME]" # path to prefetchFiles folder
+path_to_postgres_data = "[ADDME]" # path to postgres data folder
+database_name = "[ADDME]" # database name
 
 def getInterArrivalTime(fractionOverlap):
-  expRT = 619 # expected runtime of tmp-18 queries
+  expRT = 619 # expected runtime of tmp-18 queries, change for other template
   return expRT * ((1 - fractionOverlap)/(1 + fractionOverlap))
 
 saveOutput = False
 runs = 10
-useOldTestQueries = True
-
-resultDIR = "resultFiles/concurrentRevision/"
 
 totalQueries = 5
 # second delay from start
@@ -26,17 +30,19 @@ totalQueries = 5
 fractionOverlap = 0.25
 delayMax = getInterArrivalTime(fractionOverlap) # based on inter arrival time
 
-
-templates = ["tmp018", "leaftmp019", "tmp091"]
+# add the templates here where the query can be scheduled from
+# single template will make all queries be from the same template
+templates = ["tmp018", "tmp019", "tmp091"]
 #templates = ["tmp018"]
 configs = ["no-prefetch", "full-prefetch"]
 
 allQueries = []
 # gather all queries
 for tmp in templates:
-  queries = os.listdir("final_exp/queries/"+tmp+"/")
+  queries = os.listdir(path_to_dataset+"/"+tmp+"/queries")
   for q in queries:
-    allQueries.append("final_exp/queries/"+tmp+"/"+q)
+    if q.startswith('t'):
+      allQueries.append(path_to_dataset+"/"+tmp+"/queries/"+q)
 allQueries.sort()
 
 execTimeDict = {}
@@ -79,7 +85,7 @@ for run in range(runs):
     processDict = {}
 
     # write config
-    with open("prefetchFiles/config.txt", "w") as f:
+    with open(path_to_prefetchFiles+"/config.txt", "w") as f:
       f.write(cfg + "\n")
 
     # start server
@@ -88,7 +94,7 @@ for run in range(runs):
     time.sleep(2)
     os.system('sudo sh -c \'echo 1 > /proc/sys/vm/drop_caches\'')
     os.system('free -h')
-    os.system('pg_ctl -D ~/research/aio_postgres/pgsql/data start')
+    os.system('pg_ctl -D '+path_to_postgres_data+' start')
     time.sleep(5)
 
     count = 0
@@ -99,7 +105,7 @@ for run in range(runs):
 
       while len(completedDict) < len(testQueries):
         if curIndex < totalQueries and testQueries[curIndex][1] < float(time.perf_counter() - startTime):
-          processDict[testQueries[curIndex][0]] = subprocess.Popen(["psql", "-d", "dsb100", "-f", testQueries[curIndex][0]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+          processDict[testQueries[curIndex][0]] = subprocess.Popen(["psql", "-d", database_name, "-f", testQueries[curIndex][0]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
           startDict[testQueries[curIndex][0]] = time.perf_counter()
           curIndex += 1
 
@@ -114,7 +120,7 @@ for run in range(runs):
     else:
       startTime = time.perf_counter()
       for query in testQueries:
-        processDict[query[0]] = subprocess.Popen(["psql", "-d", "dsb100", "-f", query[0]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        processDict[query[0]] = subprocess.Popen(["psql", "-d", database_name, "-f", query[0]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         startDict[query[0]] = time.perf_counter()        
 
       while len(completedDict) < len(testQueries):
@@ -133,7 +139,7 @@ for run in range(runs):
     print(startDict)
     print(completedDict)
 
-    os.system('pg_ctl -D ~/research/aio_postgres/pgsql/data stop')
+    os.system('pg_ctl -D '+path_to_postgres_data+' stop')
     time.sleep(2)
 
     # calculate runtime
@@ -148,9 +154,6 @@ for run in range(runs):
       execTimeDict[cfg][key].append(float(endTime - startTime))
 
     print(execTimeDict)
-    with open(resultDIR+str(totalQueries)+"-execTimeDict-t18-"+str(fractionOverlap)+".pickle", "wb") as handle:
+    with open(path_to_result+"/"+str(totalQueries)+"-execTimeDict-"+"-".join(templates)+"-"+str(fractionOverlap)+".pickle", "wb") as handle:
       pickle.dump(execTimeDict, handle, protocol=pickle.HIGHEST_PROTOCOL)
-
-exit(0)
-
 
